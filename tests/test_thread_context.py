@@ -255,3 +255,17 @@ def test_filter_messages_by_keyword_and_time():
     assert [m.text.split()[0] for m in got] == ["3", "4", "5"]
     got = tc.filter_messages(msgs, query="CÂU HỎI")
     assert [m.id for m in got] == [ROOT]
+
+
+# ---------- Hermes-style: verbatim tail sized like Hermes's post-compression tail ----------
+
+def test_compose_tail_tokens_bounds_verbatim_recent_part():
+    msgs = _msgs(200)
+
+    async def s(_):
+        return "SUM"
+
+    out = run(tc.compose_context(msgs, budget_tokens=2000, tail_tokens=300, summarize=s, full=True, tz=UTC))
+    after_summary = out.split("[Hết tóm tắt]")[1]
+    assert "câu hỏi gốc" in out and "SUM" in out and "199 xxx" in after_summary
+    assert tc._cost(after_summary.splitlines()) <= 300 + 40   # recent verbatim part ~ tail budget (+footer)

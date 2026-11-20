@@ -1,4 +1,4 @@
-# teams-threads 0.1.0
+# teams-threads 0.1.2
 
 Hermes plugin: a Microsoft Teams channel thread is one context. When the bot is @mentioned in a
 channel thread, the plugin reads the thread from Microsoft Graph and gives it to the agent as
@@ -18,13 +18,13 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 1. Copy the folder: `scp -r plugin/teams-threads solution:~/.hermes/plugins/` (files: `plugin.yaml`, `__init__.py`, `thread_context.py`, `graph_client.py`).
 2. Make sure `config.yaml` has `plugins.enabled: [..., teams-threads]`.
 3. Restart the gateway: `systemctl --user restart hermes-gateway.service`.
-4. Check `gateway.log` for `[teams-threads] registered ThreadAwareTeamsAdapter v0.1.0` and `✓ teams connected`.
+4. Check `gateway.log` for `[teams-threads] registered ThreadAwareTeamsAdapter v0.1.2` and `✓ teams connected`.
 
 ## Configuration
 
 | Key | Default | Meaning |
 |---|---|---|
-| Thread history budget | from Hermes `compression.*` | target_ratio x threshold x active model context window (Hermes's post-compression tail budget; 10% by default). No plugin setting. Above it: root + newest messages verbatim, middle summarized. |
+| Thread history budget | from Hermes `compression.*` | Handled like Hermes's own context: the thread may fill the session up to the compression line (threshold x model context window, minus the tokens the session already used; 40% of the window for a new session by default). Above it: root + newest messages verbatim up to Hermes's tail budget (target_ratio x threshold x window, 10% by default), middle summarized. No plugin setting. |
 | `auxiliary.compression` (Hermes) | current config | Model used for the summary (same route as session compression). |
 | `TEAMS_CLIENT_ID/SECRET/TENANT_ID` | existing | Reused for the Graph app-only token. |
 

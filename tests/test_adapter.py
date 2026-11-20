@@ -38,8 +38,11 @@ class FakeGraph:
 
 
 class FakeStore:
-    def __init__(self, existing=()):
+    def __init__(self, existing=(), prompt_tokens=None):
+        import threading
         self.entries = {k: {} for k in existing}
+        self._lock = threading.RLock()
+        self._entries = {k: types.SimpleNamespace(last_prompt_tokens=v) for k, v in (prompt_tokens or {}).items()}
 
     def get_session_metadata(self, key, name, default=None):
         return self.entries.get(key, {}).get(name, default)
@@ -211,8 +214,8 @@ def test_root_id_from_conversation_when_reply_chain_missing():
 def test_summarizer_used_when_over_budget(monkeypatch):
     msgs = [gm(ROOT, 0, "root")] + [gm(str(1100 + i), i % 60, "y" * 400) for i in range(1, 59)]
     adapter = make_adapter(FakeGraph(msgs), FakeStore(existing=[key()]))
-    monkeypatch.setattr(plugin, "_compression_tail_ratio", lambda: 0.10)
-    adapter._message_handler = FakeRunner(ctx_len=10_000).handle      # budget 1000 tokens
+    monkeypatch.setattr(plugin, "_compression_settings", lambda: (0.20, 0.50))
+    adapter._message_handler = FakeRunner(ctx_len=10_000).handle      # limit 2000, tail 1000 -> budget 1000
     ev = asyncio.run(deliver(adapter, activity("1999", minute=59), event()))
     assert "SUMMARY" in ev.channel_context
 
@@ -299,9 +302,9 @@ def _budget_seen(monkeypatch, adapter):
     seen = {}
     real = plugin.tc.compose_context
 
-    async def spy(messages, *, budget_tokens, **kw):
-        seen["budget"] = budget_tokens
-        return await real(messages, budget_tokens=budget_tokens, **kw)
+    async def spy(messages, *, budget_tokens, tail_tokens=None, **kw):
+        seen["budget"], seen["tail"] = budget_tokens, tail_tokens
+        return await real(messages, budget_tokens=budget_tokens, tail_tokens=tail_tokens, **kw)
     monkeypatch.setattr(plugin.tc, "compose_context", spy)
     asyncio.run(deliver(adapter, activity("1999"), event()))
     return seen["budget"]
@@ -310,26 +313,55 @@ def _budget_seen(monkeypatch, adapter):
 def _hermes_config(monkeypatch, cfg):
     mod = types.ModuleType("hermes_cli.config")
     mod.load_config = lambda: cfg
-    pkg = sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli")
-    monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli", sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli"))
     monkeypatch.setitem(sys.modules, "hermes_cli.config", mod)
 
 
-def test_budget_equals_hermes_compression_tail_budget(monkeypatch):
-    # Hermes: post-compression tail budget = target_ratio x threshold x context_length
+def _spy_tail(monkeypatch, adapter):
+    seen = {}
+    real = plugin.tc.compose_context
+
+    async def spy(messages, *, budget_tokens, tail_tokens=None, **kw):
+        seen["budget"], seen["tail"] = budget_tokens, tail_tokens
+        return await real(messages, budget_tokens=budget_tokens, tail_tokens=tail_tokens, **kw)
+    monkeypatch.setattr(plugin.tc, "compose_context", spy)
+    asyncio.run(deliver(adapter, activity("1999"), event()))
+    return seen
+
+
+def test_new_session_may_fill_up_to_compression_threshold(monkeypatch):
+    # Like Hermes: a session grows verbatim until threshold x window; only then is it compressed.
     _hermes_config(monkeypatch, {"compression": {"threshold": 0.50, "target_ratio": 0.20}})
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
     runner = FakeRunner(ctx_len=200_000)
     adapter._message_handler = runner.handle
-    assert _budget_seen(monkeypatch, adapter) == 20_000
+    seen = _spy_tail(monkeypatch, adapter)
+    # headroom = 0.50*200k - reserve (unknown usage -> Hermes tail 20k as reserve for prompt/tools)
+    assert seen == {"budget": 80_000, "tail": 20_000}
     assert runner.calls == [key()]
+
+
+def test_headroom_shrinks_with_tokens_already_used(monkeypatch):
+    _hermes_config(monkeypatch, {"compression": {"threshold": 0.50, "target_ratio": 0.20}})
+    store = FakeStore(existing=[key()], prompt_tokens={key(): 70_000})
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]), store)
+    adapter._message_handler = FakeRunner(ctx_len=200_000).handle
+    assert _spy_tail(monkeypatch, adapter) == {"budget": 30_000, "tail": 20_000}
+
+
+def test_session_already_at_threshold_gets_hermes_tail_only(monkeypatch):
+    _hermes_config(monkeypatch, {"compression": {"threshold": 0.50, "target_ratio": 0.20}})
+    store = FakeStore(existing=[key()], prompt_tokens={key(): 99_000})
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]), store)
+    adapter._message_handler = FakeRunner(ctx_len=200_000).handle
+    assert _spy_tail(monkeypatch, adapter) == {"budget": 20_000, "tail": 20_000}
 
 
 def test_budget_follows_user_compression_settings(monkeypatch):
     _hermes_config(monkeypatch, {"compression": {"threshold": 0.60, "target_ratio": 0.30}})
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
     adapter._message_handler = FakeRunner(ctx_len=1_000_000).handle
-    assert _budget_seen(monkeypatch, adapter) == 180_000
+    assert _spy_tail(monkeypatch, adapter) == {"budget": 420_000, "tail": 180_000}
 
 
 def test_budget_uses_hermes_defaults_when_config_unreadable(monkeypatch):
@@ -340,7 +372,7 @@ def test_budget_uses_hermes_defaults_when_config_unreadable(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.config", mod)
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
     adapter._message_handler = FakeRunner(ctx_len=200_000).handle
-    assert _budget_seen(monkeypatch, adapter) == 20_000
+    assert _spy_tail(monkeypatch, adapter) == {"budget": 80_000, "tail": 20_000}
 
 
 @pytest.mark.parametrize("handler", [None, "no-runner", "error"])

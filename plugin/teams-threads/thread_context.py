@@ -309,9 +309,14 @@ def _wrap(header: str, lines: list[str]) -> str:
 
 
 async def compose_context(messages: list[ThreadMessage], *, budget_tokens: int, summarize: Summarizer,
-                          full: bool, tz=None, chunk_tokens: int = MAP_CHUNK_TOKENS,
+                          full: bool, tz=None, tail_tokens: Optional[int] = None,
+                          chunk_tokens: int = MAP_CHUNK_TOKENS,
                           summary_timeout: float = SUMMARY_TIMEOUT) -> Optional[str]:
-    """The ``channel_context`` block, or None when there is nothing to add."""
+    """The ``channel_context`` block, or None when there is nothing to add.
+
+    Fits ``budget_tokens`` -> verbatim. Otherwise compacted like Hermes's ContextCompressor: root
+    pinned (head), newest messages verbatim up to ``tail_tokens`` (Hermes tail budget; default half
+    of the budget), the middle summarized into what is left."""
     if not messages:
         return None
     header = HEADER_FULL if full else HEADER_DELTA
@@ -326,7 +331,7 @@ async def compose_context(messages: list[ThreadMessage], *, budget_tokens: int, 
         pinned = [_truncate(lines[0], max(1, avail // 4))]
         rest = rest[1:]
     recent: list[str] = []
-    recent_budget = avail // 2
+    recent_budget = min(tail_tokens, avail // 2) if tail_tokens else avail // 2
     for _msg, line in reversed(rest):
         if _cost(recent + [line]) > recent_budget:
             break

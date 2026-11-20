@@ -23,7 +23,7 @@ from .graph_client import GraphClient, GraphError
 
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 WATERMARK_KEY = "teams_thread_watermark"
 DEFAULT_BUDGET_TOKENS = 12_000          # fallback when the model's context window is unknown
 DEFAULT_COMPRESSION_THRESHOLD = 0.50
@@ -36,11 +36,9 @@ _CURRENT_ACTIVITY: contextvars.ContextVar = contextvars.ContextVar("teams_thread
 _LIVE_ADAPTER: Optional["ThreadAwareTeamsAdapter"] = None   # one Teams adapter per gateway process
 
 
-def _compression_tail_ratio() -> float:
-    """Share of the context window that Hermes keeps verbatim after compression:
-    ``compression.target_ratio x compression.threshold`` (config.yaml docs: "Post-compression tail
-    budget is target_ratio x threshold x context_length"). Defaults/clamp mirror ContextCompressor
-    (threshold 0.50, target_ratio 0.20 clamped to 0.10-0.80 -> 10% of the window)."""
+def _compression_settings() -> tuple[float, float]:
+    """Hermes ``compression.threshold`` and ``compression.target_ratio`` from config.yaml, with the
+    defaults and clamps of ContextCompressor (0.50 / 0.20, target clamped to 0.10-0.80)."""
     threshold, target = DEFAULT_COMPRESSION_THRESHOLD, DEFAULT_COMPRESSION_TARGET_RATIO
     try:
         from hermes_cli.config import load_config
@@ -49,9 +47,7 @@ def _compression_tail_ratio() -> float:
         target = float(comp.get("target_ratio", target))
     except Exception:
         logger.debug("[teams-threads] compression config unreadable; using Hermes defaults", exc_info=True)
-    threshold = min(max(threshold, 0.05), 1.0)
-    target = min(max(target, 0.10), 0.80)
-    return threshold * target
+    return min(max(threshold, 0.05), 1.0), min(max(target, 0.10), 0.80)
 
 
 def _as_utc(value: Any) -> Optional[datetime]:
@@ -137,23 +133,47 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         except Exception:
             return False
 
-    async def _tt_budget(self, event, key: str) -> int:
-        """Token budget for one history injection = Hermes's own post-compression tail budget
-        (target_ratio x threshold x context window of the model this turn runs on). The window comes
-        from the same resolver the gateway runner uses (incl. /model overrides; precedent:
-        gateway/session_context_refs.py:51). No plugin setting: it follows compression.* in config.yaml.
-        Unknown window -> DEFAULT_BUDGET_TOKENS."""
+    def _tt_prompt_tokens(self, key: str) -> int:
+        """Prompt tokens the session used on its last turn (``SessionEntry.last_prompt_tokens``,
+        the value Hermes's own compression pre-check reads). 0 when unknown."""
+        store = getattr(self, "_session_store", None)
+        entries = getattr(store, "_entries", None)
+        if not isinstance(entries, dict):
+            return 0
+        try:
+            lock = getattr(store, "_lock", None)
+            if lock is None:
+                entry = entries.get(key)
+            else:
+                with lock:
+                    entry = entries.get(key)
+            return max(0, int(getattr(entry, "last_prompt_tokens", 0) or 0))
+        except Exception:
+            return 0
+
+    async def _tt_budget(self, event, key: str) -> tuple[int, Optional[int]]:
+        """(budget, tail) for one history injection, handled the way Hermes handles its own context:
+        the session may grow verbatim until ``threshold x window`` (Hermes compresses only there), so
+        the thread may use the headroom left below that line. Above it, compaction keeps a verbatim
+        tail of ``target_ratio x threshold x window`` (Hermes's post-compression tail budget).
+        Headroom = threshold x window - last prompt tokens; for a new session the tail budget is
+        reserved for the system prompt, tools and the reply. Never below the tail budget.
+        The window comes from the resolver the gateway runner uses (incl. /model overrides;
+        precedent: gateway/session_context_refs.py:51). Unknown window -> (DEFAULT_BUDGET_TOKENS, None)."""
         runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
         resolver = getattr(runner, "_inbound_model_context_length", None)
         if callable(resolver):
             try:
                 ctx_len = int(await resolver(getattr(event, "source", None), key))
                 if ctx_len > 0:
-                    ratio = await asyncio.to_thread(_compression_tail_ratio)
-                    return max(MIN_BUDGET_TOKENS, int(ctx_len * ratio))
+                    threshold, target = await asyncio.to_thread(_compression_settings)
+                    limit = int(ctx_len * threshold)
+                    tail = max(MIN_BUDGET_TOKENS, int(limit * target))
+                    used = self._tt_prompt_tokens(key) or tail
+                    return max(tail, limit - used), tail
             except Exception:
                 logger.debug("[teams-threads] context length lookup failed", exc_info=True)
-        return DEFAULT_BUDGET_TOKENS
+        return DEFAULT_BUDGET_TOKENS, None
 
     # ------------------------------------------------------------------ flow
     def _tt_forget_pending(self, event) -> None:
@@ -205,8 +225,8 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         self._tt_thread_teams[info["conv_id"]] = info["team_id"]
         messages, seen_wm = tc.select_messages(raw, root_id=info["root_id"], bot_app_id=self._client_id,
                                                trigger_id=trigger_id, after=after)
-        budget = await self._tt_budget(event, key)
-        context = await tc.compose_context(messages, budget_tokens=budget,
+        budget, tail = await self._tt_budget(event, key)
+        context = await tc.compose_context(messages, budget_tokens=budget, tail_tokens=tail,
                                            summarize=self._tt_summarize, full=after is None)
         if context:
             event.channel_context = context
