@@ -60,3 +60,24 @@ Anh Tuấn trả lời "oke luôn" (Graph: `mentions=[]`, **không** mention) v�
 | `channelData.replyChain.id` có trong activity | **Đúng** | `reply_chain_id=1795146225973` (= id tin gốc) |
 | `channelData.team.aadGroupId` có trong activity | **Đúng** | `team_aad_group_id=2670e8c8-…` |
 | `reply_to_id` của tin trả lời trong channel | **`None`** | Ngoại lệ `_sent_ids` của adapter gốc không bao giờ áp dụng trong channel |
+
+## Lần thử 4 — plugin v0.1.2 chạy thật (2026-11-20, 05:22–05:32 UTC)
+
+Deploy: bản khung v0.0.1 sao lưu ở `~/.hermes/plugins-backup-teams-threads-v0.0.1`; gateway khởi động lại 05:22:45; `agent.log` có `registered ThreadAwareTeamsAdapter v0.1.2`.
+Tin thử gửi bằng tài khoản Teams của anh Tuấn qua Composio (`composio proxy` tới Graph; công cụ `MICROSOFT_TEAMS_POST_MESSAGE_REPLY` không cho mention bot vì thiếu `applicationIdentityType: bot`).
+
+| TC | Thread (root id) | Kết quả | Bằng chứng |
+|---|---|---|---|
+| TC1 | `1795152290200` | **Đạt** | Bot chào Việt / Nhật / Anh; log `mode=full fetched=3 added=2 budget=400000 tail=100000` |
+| TC2 | `1795152355739` | **Đạt** | Lượt 2 `mode=delta added=0`; bot nhớ "Mèo" ở lượt 4 |
+| TC3 | `1795152355739` | **Đạt** | Tin không mention: không có trả lời trong 40 s; lần mention sau: `added=1`, bot trả lời "4711" |
+| TC4 | `1795152465402`, `1795152469295` | **Đạt** | Mỗi thread chỉ biết màu của mình (ĐỎ / XANH LÁ) |
+| TC5 | `1795152471825` | **Đạt** | Không có trả lời; root id không xuất hiện trong `agent.log`/`gateway.log` (không gọi Graph) |
+| TC6 | `1795152469295` | **Đạt** | Gateway tắt, gửi 2 tin, bật lại; lần mention sau `mode=delta added=2`, bot trả lời "Huế", "88" |
+| TC7 | `1795152465402` | **Đạt** | Sau `/new`: `mode=full fetched=6 added=3`; bot vẫn trả lời "ĐỎ" |
+| TC8 (phần tool) | `1795152469295` | **Đạt** | `agent.tool_executor: tool teams_thread_read completed (2.01s)`; bot đếm đúng 4 tin, 1 tin của bot |
+| Tóm tắt bằng LLM phụ | — | **Đạt** | Gọi `async_call_llm(task="compression")` trực tiếp trên host: trả về bản tóm tắt tiếng Việt đúng nội dung |
+| Ngân sách giống Hermes | — | **Đạt** | Cửa sổ 1.000.000 → session mới `budget=400000`; sau vài lượt `budget=482989` (= 500000 − `last_prompt_tokens`) |
+
+Chưa thử thật: TC8 phần nén (cần thread > 400.000 token), TC8b, TC9, TC10 — chỉ có test tự động.
+Dòng `capability_check ... tools.override decision=deny` xuất hiện cho cả `composio-connections`, `hermes-push`: là kiểm tra chung, không phải lỗi của plugin.
