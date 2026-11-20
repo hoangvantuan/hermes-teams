@@ -31,7 +31,7 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 ## Logs
 
 Lines start with `[teams-threads]` and contain only ids and counts, never message text or tokens:
-`root=<id> mode=full|delta fetched=N added=N tokens=N`. Graph failures log a WARNING and the bot
+`root=<id> mode=full|delta fetched=N added=N tokens=N budget=N tail=N`. Graph failures log a WARNING and the bot
 answers without history.
 
 ## Rollback

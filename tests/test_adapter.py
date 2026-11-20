@@ -387,3 +387,13 @@ def test_budget_falls_back_when_context_length_unknown(monkeypatch, handler):
     else:
         adapter._message_handler = None
     assert _budget_seen(monkeypatch, adapter) == plugin.DEFAULT_BUDGET_TOKENS
+
+
+def test_prompt_tokens_read_via_hermes_entry_lookup(monkeypatch):
+    _hermes_config(monkeypatch, {"compression": {"threshold": 0.50, "target_ratio": 0.20}})
+    store = FakeStore(existing=[key()])
+    loaded = {key(): types.SimpleNamespace(last_prompt_tokens=60_000)}
+    store._entry_locked = lambda k: loaded.get(k)        # Hermes loads the index lazily
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]), store)
+    adapter._message_handler = FakeRunner(ctx_len=200_000).handle
+    assert _spy_tail(monkeypatch, adapter) == {"budget": 40_000, "tail": 20_000}

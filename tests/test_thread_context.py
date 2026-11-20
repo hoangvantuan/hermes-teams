@@ -269,3 +269,44 @@ def test_compose_tail_tokens_bounds_verbatim_recent_part():
     after_summary = out.split("[Hết tóm tắt]")[1]
     assert "câu hỏi gốc" in out and "SUM" in out and "199 xxx" in after_summary
     assert tc._cost(after_summary.splitlines()) <= 300 + 40   # recent verbatim part ~ tail budget (+footer)
+
+
+def test_compose_summary_target_capped_at_tail_tokens():
+    msgs = _msgs(200)
+    targets = []
+
+    async def s(messages):
+        targets.append(messages[0]["content"] + messages[1]["content"])
+        return "Z" * 20_000
+
+    out = run(tc.compose_context(msgs, budget_tokens=2000, tail_tokens=200, summarize=s, full=True, tz=UTC))
+    body = out.split("[Hết tóm tắt]")[0].split("\n", 2)[-1]
+    assert tc.estimate_tokens(body) <= 200 + 60
+
+
+def test_map_calls_run_in_parallel():
+    msgs = _msgs(200)
+    live, peak = [0], [0]
+
+    async def s(messages):
+        live[0] += 1
+        peak[0] = max(peak[0], live[0])
+        await asyncio.sleep(0.01)
+        live[0] -= 1
+        return "p"
+
+    run(tc.compose_context(msgs, budget_tokens=1000, summarize=s, full=True, tz=UTC, chunk_tokens=300))
+    assert 1 < peak[0] <= tc.MAP_CONCURRENCY
+
+
+def test_estimate_tokens_matches_hermes_rough_count():
+    assert tc.estimate_tokens("") == 0
+    assert tc.estimate_tokens("abcd" * 10) == 10                 # ASCII: chars / 4
+    assert tc.estimate_tokens("chào anh") == 3                   # Vietnamese: UTF-8 bytes / 4 (10 bytes)
+    assert tc.estimate_tokens("中文字") == 3                       # CJK: 1 per character
+
+
+def test_truncate_respects_byte_based_count():
+    text = "Tiếng Việt có dấu " * 200
+    out = tc._truncate(text, 50)
+    assert out.endswith("…") and tc.estimate_tokens(out) <= 50

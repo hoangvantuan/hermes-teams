@@ -137,18 +137,24 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         """Prompt tokens the session used on its last turn (``SessionEntry.last_prompt_tokens``,
         the value Hermes's own compression pre-check reads). 0 when unknown."""
         store = getattr(self, "_session_store", None)
-        entries = getattr(store, "_entries", None)
-        if not isinstance(entries, dict):
+        if store is None:
             return 0
         try:
+            lookup = getattr(store, "_entry_locked", None)       # loads the index first (session_persistence.py:266)
+            if not callable(lookup):
+                entries = getattr(store, "_entries", None)
+                lookup = entries.get if isinstance(entries, dict) else None
+            if lookup is None:
+                return 0
             lock = getattr(store, "_lock", None)
             if lock is None:
-                entry = entries.get(key)
+                entry = lookup(key)
             else:
                 with lock:
-                    entry = entries.get(key)
+                    entry = lookup(key)
             return max(0, int(getattr(entry, "last_prompt_tokens", 0) or 0))
         except Exception:
+            logger.debug("[teams-threads] last_prompt_tokens unavailable", exc_info=True)
             return 0
 
     async def _tt_budget(self, event, key: str) -> tuple[int, Optional[int]]:
@@ -234,9 +240,9 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         if not any(str(m.get("id")) == trigger_id for m in raw):   # trigger not yet visible in Graph
             candidates.append(_as_utc(getattr(activity, "timestamp", None)))
         new_wm = max((c for c in candidates if c is not None), default=None)
-        logger.info("[teams-threads] root=%s mode=%s fetched=%d added=%d tokens=%d",
+        logger.info("[teams-threads] root=%s mode=%s fetched=%d added=%d tokens=%d budget=%d tail=%s",
                     info["root_id"], "full" if after is None else "delta", len(raw), len(messages),
-                    tc.estimate_tokens(context or ""))
+                    tc.estimate_tokens(context or ""), budget, tail)
         return new_wm
 
     # ------------------------------------------------------------------ watermark (F6)
