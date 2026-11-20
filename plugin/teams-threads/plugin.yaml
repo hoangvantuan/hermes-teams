@@ -1,6 +1,7 @@
 name: teams-threads
 kind: platform
-version: 0.0.1
+version: 0.1.0
 description: >
-  Teams channel thread = one context. v0.0.1 skeleton: subclasses the bundled
-  TeamsAdapter and only logs inbound activity ids (gates C2/C3 in docs/PRD.md).
+  Teams channel thread = one context. When the bot is @mentioned in a channel thread, the
+  thread is read from Microsoft Graph (full once, then only newer messages) and attached as
+  channel context; long threads are compacted. Adds the teams_thread_read tool.
