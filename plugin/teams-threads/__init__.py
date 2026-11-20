@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 VERSION = "0.1.1"
 WATERMARK_KEY = "teams_thread_watermark"
 DEFAULT_BUDGET_TOKENS = 12_000          # fallback when the model's context window is unknown
-DEFAULT_BUDGET_RATIO = 0.10
+DEFAULT_COMPRESSION_THRESHOLD = 0.50
+DEFAULT_COMPRESSION_TARGET_RATIO = 0.20
 MIN_BUDGET_TOKENS = 1_000
 TOOL_NAME = "teams_thread_read"
 TOOL_MAX_CHARS = 40_000
@@ -35,28 +36,22 @@ _CURRENT_ACTIVITY: contextvars.ContextVar = contextvars.ContextVar("teams_thread
 _LIVE_ADAPTER: Optional["ThreadAwareTeamsAdapter"] = None   # one Teams adapter per gateway process
 
 
-def _fixed_budget_tokens(config) -> Optional[int]:
-    """Explicit fixed budget (``TEAMS_THREAD_BUDGET_TOKENS`` / ``extra.thread_budget_tokens``) or None."""
-    extra = getattr(config, "extra", None) or {}
-    raw = os.getenv("TEAMS_THREAD_BUDGET_TOKENS") or extra.get("thread_budget_tokens")
-    if raw in (None, ""):
-        return None
+def _compression_tail_ratio() -> float:
+    """Share of the context window that Hermes keeps verbatim after compression:
+    ``compression.target_ratio x compression.threshold`` (config.yaml docs: "Post-compression tail
+    budget is target_ratio x threshold x context_length"). Defaults/clamp mirror ContextCompressor
+    (threshold 0.50, target_ratio 0.20 clamped to 0.10-0.80 -> 10% of the window)."""
+    threshold, target = DEFAULT_COMPRESSION_THRESHOLD, DEFAULT_COMPRESSION_TARGET_RATIO
     try:
-        return max(MIN_BUDGET_TOKENS, int(raw))
-    except (TypeError, ValueError):
-        logger.warning("[teams-threads] invalid TEAMS_THREAD_BUDGET_TOKENS; using the context ratio")
-        return None
-
-
-def _budget_ratio(config) -> float:
-    extra = getattr(config, "extra", None) or {}
-    raw = os.getenv("TEAMS_THREAD_BUDGET_RATIO") or extra.get("thread_budget_ratio")
-    try:
-        value = float(raw) if raw not in (None, "") else DEFAULT_BUDGET_RATIO
-    except (TypeError, ValueError):
-        logger.warning("[teams-threads] invalid TEAMS_THREAD_BUDGET_RATIO; using %.2f", DEFAULT_BUDGET_RATIO)
-        value = DEFAULT_BUDGET_RATIO
-    return min(max(value, 0.01), 0.40)
+        from hermes_cli.config import load_config
+        comp = (load_config() or {}).get("compression") or {}
+        threshold = float(comp.get("threshold", threshold))
+        target = float(comp.get("target_ratio", target))
+    except Exception:
+        logger.debug("[teams-threads] compression config unreadable; using Hermes defaults", exc_info=True)
+    threshold = min(max(threshold, 0.05), 1.0)
+    target = min(max(target, 0.10), 0.80)
+    return threshold * target
 
 
 def _as_utc(value: Any) -> Optional[datetime]:
@@ -77,8 +72,6 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         super().__init__(config, *args, **kwargs)
         self._tt_graph: Optional[GraphClient] = None
         self._tt_summarize = _aux_summarize
-        self._tt_budget_tokens = _fixed_budget_tokens(config)   # None -> ratio of the model's window
-        self._tt_budget_ratio = _budget_ratio(config)
         self._tt_locks: dict[str, asyncio.Lock] = {}
         self._tt_pending: dict[str, datetime] = {}      # session key -> watermark not yet persisted
         self._tt_tasks: set[asyncio.Task] = set()
@@ -145,18 +138,19 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
             return False
 
     async def _tt_budget(self, event, key: str) -> int:
-        """Token budget for one history injection: fixed override, else ratio x the context window of
-        the model this turn runs on (same resolver the gateway runner uses, incl. /model overrides;
-        precedent: gateway/session_context_refs.py:51), else DEFAULT_BUDGET_TOKENS."""
-        if self._tt_budget_tokens is not None:
-            return self._tt_budget_tokens
+        """Token budget for one history injection = Hermes's own post-compression tail budget
+        (target_ratio x threshold x context window of the model this turn runs on). The window comes
+        from the same resolver the gateway runner uses (incl. /model overrides; precedent:
+        gateway/session_context_refs.py:51). No plugin setting: it follows compression.* in config.yaml.
+        Unknown window -> DEFAULT_BUDGET_TOKENS."""
         runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
         resolver = getattr(runner, "_inbound_model_context_length", None)
         if callable(resolver):
             try:
                 ctx_len = int(await resolver(getattr(event, "source", None), key))
                 if ctx_len > 0:
-                    return max(MIN_BUDGET_TOKENS, int(ctx_len * self._tt_budget_ratio))
+                    ratio = await asyncio.to_thread(_compression_tail_ratio)
+                    return max(MIN_BUDGET_TOKENS, int(ctx_len * ratio))
             except Exception:
                 logger.debug("[teams-threads] context length lookup failed", exc_info=True)
         return DEFAULT_BUDGET_TOKENS

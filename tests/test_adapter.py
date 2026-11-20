@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import sys
 import types
 from datetime import datetime, timezone
 
@@ -207,10 +208,11 @@ def test_root_id_from_conversation_when_reply_chain_missing():
     assert graph.calls[0][2] == ROOT
 
 
-def test_summarizer_used_when_over_budget():
+def test_summarizer_used_when_over_budget(monkeypatch):
     msgs = [gm(ROOT, 0, "root")] + [gm(str(1100 + i), i % 60, "y" * 400) for i in range(1, 59)]
     adapter = make_adapter(FakeGraph(msgs), FakeStore(existing=[key()]))
-    adapter._tt_budget_tokens = 1000
+    monkeypatch.setattr(plugin, "_compression_tail_ratio", lambda: 0.10)
+    adapter._message_handler = FakeRunner(ctx_len=10_000).handle      # budget 1000 tokens
     ev = asyncio.run(deliver(adapter, activity("1999", minute=59), event()))
     assert "SUMMARY" in ev.channel_context
 
@@ -305,9 +307,17 @@ def _budget_seen(monkeypatch, adapter):
     return seen["budget"]
 
 
-def test_budget_is_ratio_of_model_context(monkeypatch):
-    monkeypatch.delenv("TEAMS_THREAD_BUDGET_TOKENS", raising=False)
-    monkeypatch.delenv("TEAMS_THREAD_BUDGET_RATIO", raising=False)
+def _hermes_config(monkeypatch, cfg):
+    mod = types.ModuleType("hermes_cli.config")
+    mod.load_config = lambda: cfg
+    pkg = sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli")
+    monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", mod)
+
+
+def test_budget_equals_hermes_compression_tail_budget(monkeypatch):
+    # Hermes: post-compression tail budget = target_ratio x threshold x context_length
+    _hermes_config(monkeypatch, {"compression": {"threshold": 0.50, "target_ratio": 0.20}})
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
     runner = FakeRunner(ctx_len=200_000)
     adapter._message_handler = runner.handle
@@ -315,27 +325,26 @@ def test_budget_is_ratio_of_model_context(monkeypatch):
     assert runner.calls == [key()]
 
 
-def test_budget_ratio_env(monkeypatch):
-    monkeypatch.delenv("TEAMS_THREAD_BUDGET_TOKENS", raising=False)
-    monkeypatch.setenv("TEAMS_THREAD_BUDGET_RATIO", "0.25")
+def test_budget_follows_user_compression_settings(monkeypatch):
+    _hermes_config(monkeypatch, {"compression": {"threshold": 0.60, "target_ratio": 0.30}})
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
     adapter._message_handler = FakeRunner(ctx_len=1_000_000).handle
-    assert _budget_seen(monkeypatch, adapter) == 250_000
+    assert _budget_seen(monkeypatch, adapter) == 180_000
 
 
-def test_fixed_budget_env_overrides_ratio(monkeypatch):
-    monkeypatch.setenv("TEAMS_THREAD_BUDGET_TOKENS", "5000")
+def test_budget_uses_hermes_defaults_when_config_unreadable(monkeypatch):
+    mod = types.ModuleType("hermes_cli.config")
+    def boom():
+        raise OSError("no config")
+    mod.load_config = boom
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", mod)
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
-    runner = FakeRunner(ctx_len=200_000)
-    adapter._message_handler = runner.handle
-    assert _budget_seen(monkeypatch, adapter) == 5000
-    assert runner.calls == []
+    adapter._message_handler = FakeRunner(ctx_len=200_000).handle
+    assert _budget_seen(monkeypatch, adapter) == 20_000
 
 
 @pytest.mark.parametrize("handler", [None, "no-runner", "error"])
 def test_budget_falls_back_when_context_length_unknown(monkeypatch, handler):
-    monkeypatch.delenv("TEAMS_THREAD_BUDGET_TOKENS", raising=False)
-    monkeypatch.delenv("TEAMS_THREAD_BUDGET_RATIO", raising=False)
     adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
     if handler == "no-runner":
         async def plain(_e):
