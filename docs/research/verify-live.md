@@ -81,3 +81,10 @@ Tin thử gửi bằng tài khoản Teams của anh Tuấn qua Composio (`compos
 
 Chưa thử thật: TC8 phần nén (cần thread > 400.000 token), TC8b, TC9, TC10 — chỉ có test tự động.
 Dòng `capability_check ... tools.override decision=deny` xuất hiện cho cả `composio-connections`, `hermes-push`: là kiểm tra chung, không phải lỗi của plugin.
+
+### TC10 (DM và group chat) — **Đạt**
+
+- DM 05:34: tin tới bot, bot trả lời; không có dòng `[teams-threads]` (đi đường adapter gốc).
+- Group chat mới (06:01): `msTeamsAppInstalled` (teamsAppId `b8140c67-…`), mention → `inbound message` → `response ready` sau 3 s; không có dòng `[teams-threads]`.
+- Group chat cũ: app bị gỡ lúc 05:35:03 (`msTeamsAppRemoved`) khi anh Tuấn tải lại gói app; thêm lại không thành công, group mới thì được.
+- Có **hai bản app tải lên riêng** cùng trỏ tới một bot `2f0245c5-…`: `c86cf3db-…` (trong team) và `b8140c67-…` (cài cho cá nhân, dùng cho chat). Cách cài đúng cho chat: link `teams app get` in ra; tải gói thủ công báo `AppDefinitionDoesntExist`.
