@@ -34,3 +34,16 @@ Thread `1795145910429`:
 Bot không thấy yêu cầu ở tin 2. Đọc bù thread qua Graph sẽ đưa tin 1–2 vào ngữ cảnh.
 
 Token tạm (`/tmp/hv-graph` trên `solution`) đã xoá sau khi thử.
+
+## Lần thử 2 (03:43–03:44 UTC)
+
+Anh Tuấn: mention bot ở tin gốc của thread mới; sửa tin gốc `1795145902383`; xoá tin gốc `1795145910429` (thread thử lần 1).
+
+| Mục | Kết luận | Bằng chứng |
+|---|---|---|
+| Mention ở **tin gốc**: `conversation.id` có `;messageid=<id của chính tin gốc>` | **Đúng** | `gateway.log` 03:43:51: `session=agent:main:teams:channel:…;messageid=1795146225973`; Graph: tin gốc có id `1795146225973`. |
+| Cổng C1: tin gốc và tin trả lời cùng khoá session | **Đúng (suy ra từ 2 lần thử)** | Tin trả lời dùng id tin gốc (lần 1), tin gốc dùng id của chính nó (lần 2) → cùng một giá trị. Chưa thử cả hai trong **cùng** một thread. |
+| Nội dung mention ở tin gốc | Bot nhận `hello` (`msg_len=5`), thẻ `<at>` đã được bỏ | `agent.log` 03:43:47 |
+| Tin bị sửa trong Graph | Có `lastEditedDateTime`, `body` là nội dung mới | `1795145902383`: `lastEditedDateTime=2026-11-20T03:43:59.955Z` |
+| Tin gốc bị xoá trong Graph | Vẫn trả về trong `/messages`, có `deletedDateTime`, `body` rỗng; các tin trả lời vẫn đọc được | `1795145910429`: `deletedDateTime=2026-11-20T03:43:53.115Z` |
+| Bot có nhận sự kiện sửa/xoá | **Không thấy trong log** | `gateway.log`, `agent.log`, `errors.log` không có dòng nào sau 03:43:51. Có thể adapter bỏ qua im lặng. |

@@ -1,6 +1,6 @@
 # PRD: `teams-threads`, plugin Hermes cho thread trong channel Microsoft Teams
 
-- Trạng thái: **Bản nháp v0.1**. Phải qua 3 cổng ở mục 9 thì mới được viết mã.
+- Trạng thái: **Bản nháp v0.2**. Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
 - Ngày: 2026-11-20
 - Chủ sở hữu: anh Tuấn
 - Hệ thống đích: Hermes Agent (`NousResearch/hermes-agent`) chạy trên máy `solution`, bản commit `ae2a81ccc0`. App Teams là `Conan (TuanHV)`, mã `2f0245c5-26bd-4d37-906c-800b18b06982`.
@@ -56,7 +56,7 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
   1. `channelData.replyChain.id`
   2. Đuôi `;messageid=` trong `conversation.id`
   3. `activity.id`, khi tin đó là tin gốc
-  - Trên máy `solution`, Hermes đã tự tách session theo thread nhờ đuôi `;messageid=` ([verify-live]). Plugin **chỉ đổi khoá session nếu cổng C1 (mục 9) cho thấy tin gốc và tin trả lời ra hai khoá khác nhau.**
+  - Trên máy `solution`, Hermes đã tự tách session theo thread nhờ đuôi `;messageid=` ([verify-live]). Cổng C1 đã qua: tin gốc và tin trả lời cho cùng một khoá. **Plugin không đổi khoá session.**
 - **F2.** Tin không mention bot trong thread được xử lý khi thỏa cả ba điều kiện:
   - Thread đang có session.
   - `TEAMS_THREAD_REQUIRE_MENTION` khác `true`.
@@ -72,7 +72,7 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
 - **F7.** Không đưa vào lịch sử các tin sau:
   - Tin của chính bot: `from.application.id` trùng app ID ([verify-live]). Những tin này đã có trong session dưới dạng lượt trả lời của bot.
   - Tin đang kích hoạt lượt này: so khớp `activity.id` với Graph ID. Cổng C2 kiểm tra điều kiện này.
-  - Tin đã xoá: có `deletedDateTime`.
+  - Tin đã xoá: có `deletedDateTime`. Graph vẫn trả về tin đã xoá với nội dung rỗng ([verify-live] lần 2). Nếu tin gốc bị xoá thì thay bằng dòng `[tin gốc đã bị xoá]`, để các tin trả lời còn hiểu được.
   - Tin hệ thống: `messageType` khác `message`.
 - **F8.** Nếu Graph lỗi (lỗi 4xx/5xx hoặc quá 5 giây), plugin vẫn trả lời nhưng không kèm lịch sử. Plugin ghi log WARNING và không ném lỗi.
 
@@ -138,7 +138,7 @@ Tất cả tiêu chí được thử trong channel `sol-personal-tuanhv`. Phần
 
 | Cổng | Câu hỏi | Cách kiểm tra | Ảnh hưởng |
 |---|---|---|---|
-| C1 | Tin gốc có mention và tin trả lời trong cùng thread có cùng khoá session không? | Anh Tuấn mention bot ở tin gốc của một thread mới, rồi mention ở một tin trả lời. Em so 2 dòng `session=` trong `gateway.log`. | Khác khoá thì F1 phải đổi khoá session |
+| C1 ✅ | Tin gốc có mention và tin trả lời trong cùng thread có cùng khoá session không? **Đã qua** (verify-live lần 2): cả hai đều dùng id tin gốc. | Anh Tuấn mention bot ở tin gốc của một thread mới, rồi mention ở một tin trả lời. Em so 2 dòng `session=` trong `gateway.log`. | Khác khoá thì F1 phải đổi khoá session |
 | C2 | Teams có gửi tin **không mention** tới gateway không? `activity.id` có bằng Graph ID không? | Bản dựng đầu tiên của plugin ghi log `activity.id`, `replyToId`, `replyChain`, kể cả tin không mention, rồi thử trong channel | Không gửi thì G2 bất khả thi khi chỉ dựa vào tin Teams đẩy tới |
 | C3 | Gateway có khởi động và kết nối được bằng lớp con không? Có bị nạp hai bản module adapter không? | Cài một plugin rỗng (lớp con chưa có logic). Khởi động lại gateway, xem dòng `✓ teams connected` và nhắn thử trong DM. | Gãy thì gỡ plugin. Phương án dự phòng là sửa thẳng mã Hermes và gửi PR (đề xuất thay đổi mã) lên dự án gốc. |
 
