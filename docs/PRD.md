@@ -1,6 +1,7 @@
 # PRD: `teams-threads`, plugin Hermes cho thread trong channel Microsoft Teams
 
-- Trạng thái: **Bản nháp v0.2**. Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
+- Trạng thái: **Bản nháp v0.3**. Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
+- Quyết định 2026-11-20 (anh Tuấn): **bot chỉ trả lời khi được mention, không tự theo thread**, để tránh rối khi nhiều tin.
 - Ngày: 2026-11-20
 - Chủ sở hữu: anh Tuấn
 - Hệ thống đích: Hermes Agent (`NousResearch/hermes-agent`) chạy trên máy `solution`, bản commit `ae2a81ccc0`. App Teams là `Conan (TuanHV)`, mã `2f0245c5-26bd-4d37-906c-800b18b06982`.
@@ -16,10 +17,10 @@ DM và group chat đã chạy tốt. Vấn đề nằm ở **thread trong channe
 
 ## 2. Mục tiêu
 
-Thread trong channel phải hoạt động **giống cách Hermes đang xử lý thread trên Slack**:
+Thread trong channel lấy ngữ cảnh **giống cách Hermes đang xử lý thread trên Slack**, nhưng chỉ phản hồi khi được mention:
 
 - **G1 — Một thread là một ngữ cảnh.** Bot được mention ở tin gốc hay ở bất kỳ tin trả lời nào thì cũng phải thấy toàn bộ nội dung thread.
-- **G2 — Tham gia tiếp thread.** Sau khi được mention trong một thread, bot xử lý các tin trả lời tiếp theo trong thread đó mà không cần mention lại. Có một cờ để tắt hành vi này.
+- **G2 — Chỉ phản hồi khi được mention.** Mỗi lượt trả lời trong thread cần một mention. Tin không mention chỉ được đọc bù làm ngữ cảnh ở lần mention kế tiếp.
 - **G3 — Ngữ cảnh đủ và sạch.**
   - Không lặp tin. Không lẫn tin của thread khác.
   - Không còn nhiễu HTML.
@@ -33,6 +34,7 @@ Thread trong channel phải hoạt động **giống cách Hermes đang xử lý
 - Đọc ảnh và tệp đính kèm trong lịch sử thread. Bản v1 chỉ ghi `[tệp: tên]`.
 - Phản ánh việc sửa hoặc xoá tin sau khi tin đó đã vào ngữ cảnh.
 - Tin ở cấp channel nằm ngoài thread.
+- Tự theo thread sau lần mention đầu (bị loại theo quyết định ở đầu tài liệu).
 
 ## 3. Hành vi mẫu: Hermes trên Slack
 
@@ -42,10 +44,9 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
 |---|---|---|
 | Lần đầu được mention trong thread: lấy cả thread và đặt dấu đọc (watermark) | `_hydrate_thread_context` 4392–4460 | Giống hệt |
 | Thread đang có session, lại được mention: chỉ lấy phần sau dấu đọc | như trên | Giống hệt |
-| Sau khi gateway khởi động lại: tin trả lời đầu tiên kiểm tra lại các tin bị lỡ | như trên, dòng 48–57 | Giống hệt |
+| Sau khi gateway khởi động lại: tin trả lời đầu tiên kiểm tra lại các tin bị lỡ | như trên, dòng 48–57 | Không cần riêng: mỗi lần mention đều đọc bù phần sau dấu đọc |
 | Dấu đọc lưu trong metadata của session, nên vẫn còn sau khi gateway khởi động lại | `_get/_set_thread_watermark` 6334–6358 | Giống hệt |
-| Tin trả lời không mention vẫn được xử lý nếu thread đang có session | `_has_active_session_for_thread` 4176, 6360 | Giống hệt |
-| Cờ `thread_require_mention` buộc phải mention ở mọi tin | 4248–4272 | Thêm cờ `TEAMS_THREAD_REQUIRE_MENTION` |
+| Tin trả lời không mention vẫn được xử lý nếu thread đang có session | `_has_active_session_for_thread` 4176, 6360 | **Không làm.** Giống Slack khi bật `thread_require_mention` (4248–4272) |
 | Lịch sử chỉ được đưa vào lượt hội thoại mới, qua `channel_context` | `event.py:113`, `run_inbound.py:1509-1510` | Giống hệt |
 
 ## 4. Yêu cầu chức năng
@@ -57,17 +58,13 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
   2. Đuôi `;messageid=` trong `conversation.id`
   3. `activity.id`, khi tin đó là tin gốc
   - Trên máy `solution`, Hermes đã tự tách session theo thread nhờ đuôi `;messageid=` ([verify-live]). Cổng C1 đã qua: tin gốc và tin trả lời cho cùng một khoá. **Plugin không đổi khoá session.**
-- **F2.** Tin không mention bot trong thread được xử lý khi thỏa cả ba điều kiện:
-  - Thread đang có session.
-  - `TEAMS_THREAD_REQUIRE_MENTION` khác `true`.
-  - Người gửi có trong `TEAMS_ALLOWED_USERS`.
-  - Nếu không thỏa, plugin bỏ tin như bộ kết nối Teams gốc đang làm.
+- **F2.** Tin không mention bot không tạo lượt trả lời. Plugin giữ nguyên bước lọc của bộ kết nối gốc (`TEAMS_REQUIRE_MENTION=true`). Ngoại lệ có sẵn của Hermes: tin trả lời trực tiếp vào tin của bot (`reply_to_id` thuộc `_sent_ids`) — trong channel Teams `replyToId` luôn là id tin gốc nên ngoại lệ này gần như không xảy ra.
 - **F3.** Tin chỉ có mention mà không có chữ vẫn tạo được một lượt trả lời có ý nghĩa. Plugin dùng lịch sử thread làm nội dung chính và gửi dòng "(được gọi trong thread, không kèm nội dung)".
 
 ### Lấy lịch sử thread
 
 - **F4.** Lần đầu thread có session, plugin lấy toàn bộ thread qua Graph API (API của Microsoft để đọc dữ liệu Microsoft 365): tin gốc `GET /teams/{g}/channels/{c}/messages/{root}` và các tin trả lời `GET …/messages/{root}/replies`. Plugin phải đi theo `@odata.nextLink` để lấy hết các trang.
-- **F5.** Khi thread đã có session, mỗi lần được mention plugin chỉ lấy các tin mới hơn dấu đọc. Sau khi gateway khởi động lại, tin đầu tiên của thread lấy phần bị lỡ một lần.
+- **F5.** Khi thread đã có session, mỗi lần được mention plugin chỉ lấy các tin mới hơn dấu đọc. Vì mọi lượt đều có mention, các tin gửi lúc gateway tắt cũng được lấy ở lần mention kế tiếp.
 - **F6.** Dấu đọc là `createdDateTime` lớn nhất trong các tin đã đưa vào ngữ cảnh. Dấu đọc được lưu trong metadata của session, giống Slack, để còn nguyên sau khi gateway khởi động lại. Reset session thì dấu đọc cũng mất. Việc này **cần kiểm tra** (TC7).
 - **F7.** Không đưa vào lịch sử các tin sau:
   - Tin của chính bot: `from.application.id` trùng app ID ([verify-live]). Những tin này đã có trong session dưới dạng lượt trả lời của bot.
@@ -102,7 +99,7 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
   - Các hàm `check_fn`, `ensure_deps_fn`, `standalone_sender_fn` phải lấy từ **cùng một module** với lớp cha.
   - Đường import của module này cần cổng C3 kiểm tra. Bản gốc được nạp với tên `hermes_plugins.platforms__teams.adapter`, còn plugin import `plugins.platforms.teams.adapter`, tức là một bản module thứ hai.
 - **Điểm can thiệp:**
-  - Ghi đè `_on_message` (`adapter.py:498-544`): lưu `activity` vào một contextvar, mở cổng cho F2, rồi gọi lớp cha.
+  - Ghi đè `_on_message` (`adapter.py:498-544`): lưu `activity` vào một contextvar rồi gọi lớp cha. Không đổi bước lọc mention.
   - Ghi đè bước dựng `MessageEvent`, hoặc `handle_message`: gán `event.channel_context` (F4–F12).
 - **Lấy token Graph:** dùng client credentials từ `TEAMS_CLIENT_ID/SECRET/TENANT_ID`, scope `https://graph.microsoft.com/.default`. Cache token đến khi hết hạn.
 - **Lấy ID team:** dùng `channelData.team.aadGroupId` có trong activity ([verify-host V4]). Không cần gọi thêm API.
@@ -113,7 +110,6 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
 | Khoá | Mặc định | Ý nghĩa |
 |---|---|---|
 | `TEAMS_REQUIRE_MENTION` | `true` (đã bật trên `solution`) | Bắt buộc phải có khi bật RSC. Nếu tắt, bot trả lời mọi tin. |
-| `TEAMS_THREAD_REQUIRE_MENTION` | `false` | `true` thì bot chỉ phản hồi tin có mention, nhưng vẫn lấy lịch sử thread. |
 | `TEAMS_THREAD_MAX_MSGS` / `TEAMS_THREAD_MAX_CHARS` | `40` / `12000` | Trần dung lượng (F11). |
 | `plugins.enabled` | thêm `teams-threads` | Bật plugin. |
 
@@ -125,7 +121,7 @@ Tất cả tiêu chí được thử trong channel `sol-personal-tuanhv`. Phần
 |---|---|---|
 | TC1 | Tái hiện thread mẫu ở mục 1 | Bot chào bằng 3 thứ tiếng |
 | TC2 | Mention bot ngay ở tin gốc, rồi trả lời tiếp có mention | Hai lượt cùng một session. Lượt 2 không lặp lại nội dung lượt 1. |
-| TC3 | Sau TC2, trả lời tiếp **không** mention | Bot trả lời. Khi `TEAMS_THREAD_REQUIRE_MENTION=true`, bot im lặng. |
+| TC3 | Sau TC2, trả lời tiếp **không** mention, rồi mention lại | Bot im lặng ở tin không mention. Ở lần mention sau, bot thấy tin không mention đó. |
 | TC4 | Hai thread song song trong cùng channel | Không lẫn nội dung giữa hai thread |
 | TC5 | Thread chưa từng có mention bot | Bot không trả lời, không gọi Graph |
 | TC6 | Tắt gateway, nhắn 2 tin vào thread, bật lại gateway, rồi nhắn tin thứ 3 | Bot thấy cả 2 tin bị lỡ |
@@ -139,7 +135,7 @@ Tất cả tiêu chí được thử trong channel `sol-personal-tuanhv`. Phần
 | Cổng | Câu hỏi | Cách kiểm tra | Ảnh hưởng |
 |---|---|---|---|
 | C1 ✅ | Tin gốc có mention và tin trả lời trong cùng thread có cùng khoá session không? **Đã qua** (verify-live lần 2): cả hai đều dùng id tin gốc. | Anh Tuấn mention bot ở tin gốc của một thread mới, rồi mention ở một tin trả lời. Em so 2 dòng `session=` trong `gateway.log`. | Khác khoá thì F1 phải đổi khoá session |
-| C2 | Teams có gửi tin **không mention** tới gateway không? `activity.id` có bằng Graph ID không? | Bản dựng đầu tiên của plugin ghi log `activity.id`, `replyToId`, `replyChain`, kể cả tin không mention, rồi thử trong channel | Không gửi thì G2 bất khả thi khi chỉ dựa vào tin Teams đẩy tới |
+| C2 | `activity.id` của tin kích hoạt có bằng Graph ID không (để loại tin kích hoạt khỏi phần đọc bù)? Việc Teams có gửi tin không mention hay không **không còn ảnh hưởng** sau quyết định ở đầu tài liệu. | Bản dựng đầu tiên của plugin ghi log `activity.id`, `replyToId`, `replyChain` của tin kích hoạt, rồi so với Graph | Khác nhau thì loại tin kích hoạt bằng cách so nội dung và thời điểm gửi |
 | C3 | Gateway có khởi động và kết nối được bằng lớp con không? Có bị nạp hai bản module adapter không? | Cài một plugin rỗng (lớp con chưa có logic). Khởi động lại gateway, xem dòng `✓ teams connected` và nhắn thử trong DM. | Gãy thì gỡ plugin. Phương án dự phòng là sửa thẳng mã Hermes và gửi PR (đề xuất thay đổi mã) lên dự án gốc. |
 
 ## 10. Rủi ro
@@ -148,7 +144,6 @@ Tất cả tiêu chí được thử trong channel `sol-personal-tuanhv`. Phần
 |---|---|
 | `replyChain` vẫn đang ở bản preview, Microsoft có thể đổi | F1 có thứ tự dự phòng. Test cho cả 3 nguồn ID. |
 | Mã của Hermes thay đổi khi cập nhật làm gãy lớp con | Ghim phiên bản Hermes đã thử. Thêm kiểm tra khi khởi động. Về lâu dài gửi lên dự án gốc. |
-| G2 khiến bot chen vào cuộc trao đổi giữa người với người | Có cờ `TEAMS_THREAD_REQUIRE_MENTION`. Trong thread, bot chỉ tham gia sau khi được mention. |
 | RSC cho bot đọc mọi channel của team | Chỉ đọc khi có tin kích hoạt. Không lưu bản sao của thread ngoài session. |
 
 ## 11. Việc tồn đọng ngoài phạm vi mã
