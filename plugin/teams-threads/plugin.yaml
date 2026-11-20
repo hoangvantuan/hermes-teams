@@ -1,0 +1,6 @@
+name: teams-threads
+kind: platform
+version: 0.0.1
+description: >
+  Teams channel thread = one context. v0.0.1 skeleton: subclasses the bundled
+  TeamsAdapter and only logs inbound activity ids (gates C2/C3 in docs/PRD.md).
