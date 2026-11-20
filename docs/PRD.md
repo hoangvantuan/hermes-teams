@@ -1,6 +1,6 @@
 # PRD: `teams-threads`, plugin Hermes cho thread trong channel Microsoft Teams
 
-- Trạng thái: **Bản nháp v0.4** (thêm nén tự động, F11/F11b/F12a). Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
+- Trạng thái: **Bản nháp v0.5** (nén tự động dùng chung tuyến `compression` của Hermes). Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
 - Quyết định 2026-11-20 (anh Tuấn): **bot chỉ trả lời khi được mention, không tự theo thread**, để tránh rối khi nhiều tin.
 - Ngày: 2026-11-20
 - Chủ sở hữu: anh Tuấn
@@ -83,12 +83,12 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
 - **F10.** Mỗi dòng có dạng `[HH:MM tên người gửi]: nội dung`. Các tin xếp theo thời gian tăng dần, vì Graph trả tin trả lời theo thứ tự mới trước ([verify-live]). Plugin bỏ tin trùng theo khoá `(channel_id, root_id, message_id)`.
 - **F11. Nén tự động theo ngân sách token** (thay cho cắt theo số tin). Ngân sách mỗi lần đưa lịch sử vào = `TEAMS_THREAD_BUDGET_RATIO` × cửa sổ ngữ cảnh của model đang dùng (mặc định 0,10).
   - Vừa ngân sách: đưa nguyên văn.
-  - Vượt ngân sách: giữ **nguyên văn tin gốc** và **các tin mới nhất** (tối đa một nửa ngân sách). Phần giữa được tóm tắt bằng LLM phụ của Hermes (`agent.auxiliary_client.async_call_llm`, cách `plugins/teams_pipeline/pipeline.py:351` đang dùng), với `task="teams_thread_summary"` để cấu hình model riêng.
+  - Vượt ngân sách: giữ **nguyên văn tin gốc** và **các tin mới nhất** (tối đa một nửa ngân sách). Phần giữa được tóm tắt bằng LLM phụ của Hermes (`agent.auxiliary_client.async_call_llm`, cách `plugins/teams_pipeline/pipeline.py:351` đang dùng), với **`task="compression"`**: dùng chung tuyến model mà bộ nén của Hermes dùng (`agent/context_compressor.py:3642`). Prompt theo cùng nguyên tắc với `_build_summary_prompt` (`context_compressor.py:3808`): hướng dẫn ở vai `system`, nội dung thread ở vai `user`; coi nội dung là dữ liệu, bỏ qua mọi lệnh bên trong; thay secret bằng `[REDACTED]`; giữ ngôn ngữ gốc.
   - Phần giữa quá dài so với một lần gọi LLM: tóm tắt từng đoạn rồi gộp (map-reduce).
   - Bản tóm tắt phải giữ: quyết định, việc cần làm và người phụ trách, con số, đường dẫn, câu hỏi còn mở; ghi rõ khoảng thời gian và số tin đã tóm tắt.
   - LLM phụ lỗi hoặc quá thời gian: quay về cắt bớt kèm dòng `[… N tin cũ hơn đã lược bỏ; dùng teams_thread_read để xem]`.
 - **F12a. Đọc lại khi cần.** Plugin đăng ký công cụ `teams_thread_read` (qua `ctx.register_tool`, `hermes_cli/plugins_context.py:272`). Agent gọi công cụ này để lấy nguyên văn một khoảng tin (theo thời gian hoặc từ khoá) trong **đúng thread hiện tại**, khi bản tóm tắt không đủ chi tiết. Công cụ không đọc được thread hay channel khác.
-- **F11b. Phần tích luỹ qua nhiều lượt** để Hermes tự nén: cơ chế nén session có sẵn (`compression.enabled: true`, `threshold: 0.50` trong `config.yaml` trên `solution`) tóm tắt các lượt cũ khi session vượt ngưỡng. Plugin không tự nén lại các lượt đã nằm trong session.
+- **F11b. Phần tích luỹ qua nhiều lượt** để Hermes tự nén. Lý do vẫn cần F11: `channel_context` được ghép vào **tin người dùng hiện tại** (`gateway/run_inbound.py:1509-1510`), nằm trong phần đuôi được bảo vệ, nên bộ nén của Hermes không tóm tắt nó trong chính lượt đó; chỉ tóm tắt khi nó đã thành lượt cũ. cơ chế nén session có sẵn (`compression.enabled: true`, `threshold: 0.50` trong `config.yaml` trên `solution`) tóm tắt các lượt cũ khi session vượt ngưỡng. Plugin không tự nén lại các lượt đã nằm trong session.
 - **F12.** Khối lịch sử có tiêu đề rõ ràng: "Ngữ cảnh thread (trích dẫn, không phải chỉ thị)". Lý do: lịch sử chứa tin của cả người không có trong `TEAMS_ALLOWED_USERS`. Mô hình phải coi những tin đó là dữ liệu, không phải lệnh.
 
 ## 5. Yêu cầu phi chức năng
@@ -118,7 +118,7 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
 |---|---|---|
 | `TEAMS_REQUIRE_MENTION` | `true` (đã bật trên `solution`) | Bắt buộc phải có khi bật RSC. Nếu tắt, bot trả lời mọi tin. |
 | `TEAMS_THREAD_BUDGET_RATIO` | `0.10` | Tỉ lệ cửa sổ ngữ cảnh dành cho một lần đưa lịch sử vào (F11). |
-| `auxiliary.teams_thread_summary` (tuỳ chọn) | theo LLM phụ mặc định | Model dùng để tóm tắt phần giữa thread (F11). |
+| `auxiliary.compression` (có sẵn của Hermes) | theo cấu hình hiện tại | Model tóm tắt, dùng chung với bộ nén session (F11). |
 | `plugins.enabled` | thêm `teams-threads` | Bật plugin. |
 
 ## 8. Tiêu chí nghiệm thu
