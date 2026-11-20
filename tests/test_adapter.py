@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import pathlib
 import sys
 import types
 from datetime import datetime, timezone
@@ -54,9 +55,9 @@ class FakeStore:
         return True
 
 
-def activity(mid, *, conv=CONV, conv_type="channel", reply_chain=ROOT, minute=9):
+def activity(mid, *, conv=CONV, conv_type="channel", reply_chain=ROOT, minute=9, reply_to_id=None):
     return types.SimpleNamespace(
-        id=mid, conversation=types.SimpleNamespace(id=conv, conversation_type=conv_type),
+        id=mid, reply_to_id=reply_to_id, conversation=types.SimpleNamespace(id=conv, conversation_type=conv_type),
         channel_data=types.SimpleNamespace(
             model_extra={"replyChain": {"id": reply_chain}} if reply_chain else {},
             team=types.SimpleNamespace(aad_group_id=TEAM), channel=types.SimpleNamespace(id=CHAN)),
@@ -111,6 +112,29 @@ def test_register_swaps_factory_keeps_other_args_and_adds_tool():
     assert tool["schema"]["name"] == "teams_thread_read"
 
 
+def test_version_matches_plugin_yaml():
+    yaml = (pathlib.Path(plugin.__file__).parent / "plugin.yaml").read_text()
+    assert f"version: {plugin.VERSION}\n" in yaml
+
+
+def test_register_falls_back_to_plain_adapter_when_hermes_changed(monkeypatch, caplog):
+    monkeypatch.delattr(plugin.base.TeamsAdapter, "_event_session_key")
+    calls = {}
+
+    class Ctx:
+        def register_platform(self, **kw):
+            calls["platform"] = kw
+
+        def register_tool(self, **kw):
+            calls["tool"] = kw
+
+    with caplog.at_level(logging.ERROR):
+        plugin.register(Ctx())
+    assert not isinstance(calls["platform"]["adapter_factory"](None), plugin.ThreadAwareTeamsAdapter)
+    assert "tool" not in calls
+    assert any("_event_session_key" in r.getMessage() for r in caplog.records)
+
+
 # ---------- hydration ----------
 
 def test_first_mention_fetches_full_thread_into_channel_context():
@@ -162,6 +186,37 @@ def test_pending_watermark_used_when_store_write_failed():
     ev = asyncio.run(deliver(adapter, activity("1003", minute=3), event()))
     assert graph.calls[1][3] is not None                # delta, not a second full fetch
     assert "new" in ev.channel_context and "root" not in ev.channel_context
+
+
+def test_newer_pending_watermark_wins_over_older_stored_one():
+    """D3: turn 1 stored W1, turn 2's write of W2 failed -> turn 3 reads after W2, not W1."""
+    graph = FakeGraph([gm(ROOT, 0, "root"), gm("1001", 1, "a"), gm("1002", 2, "lượt 2"), gm("1004", 4, "mới")])
+    store = FakeStore(existing=[key()])
+    store.entries[key()][plugin.WATERMARK_KEY] = "2026-11-20T03:01:00+00:00"
+    adapter = make_adapter(graph, store)
+    adapter._tt_pending[key()] = datetime(2026, 11, 20, 3, 3, tzinfo=timezone.utc)
+    ev = asyncio.run(deliver(adapter, activity("1005", minute=5), event()))
+    assert graph.calls[0][3] == datetime(2026, 11, 20, 3, 3, tzinfo=timezone.utc)
+    assert "mới" in ev.channel_context and "lượt 2" not in ev.channel_context
+
+
+def test_reply_without_root_id_gets_no_history():
+    """F1: no replyChain, no ;messageid=, and the activity is a reply -> its own id is not the root."""
+    graph = FakeGraph([gm(ROOT, 0, "root")])
+    adapter = make_adapter(graph)
+    act = activity("1002", conv=CHAN, reply_chain=None, reply_to_id=ROOT)
+    ev = asyncio.run(deliver(adapter, act, event(conv=CHAN)))
+    assert graph.calls == [] and adapter.handled == [ev] and ev.channel_context is None
+
+
+def test_per_session_state_does_not_grow(monkeypatch):
+    monkeypatch.setattr(plugin, "MAX_KNOWN_THREADS", 2)
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]), FakeStore(existing=[key()]))
+    asyncio.run(deliver(adapter, activity("1001", minute=1), event()))
+    assert adapter._tt_locks == {}                       # lock dropped once the turn is over
+    for conv in ("c1", "c2", "c3"):
+        adapter._tt_remember_team(conv, TEAM)
+    assert list(adapter._tt_thread_teams) == ["c2", "c3"]
 
 
 def test_reset_session_without_watermark_refetches_full_thread():
@@ -246,6 +301,18 @@ def test_tool_includes_bot_messages_and_time_range(monkeypatch):
     assert out["count"] == 1 and "bot nói" in out["messages"]
 
 
+def test_tool_rejects_bad_time_and_reports_zone(monkeypatch):
+    graph = FakeGraph([gm(ROOT, 0, "root"), gm("1001", 1, "a")])
+    adapter = make_adapter(graph, FakeStore(existing=[key()]))
+    asyncio.run(deliver(adapter, activity("1003", minute=3), event()))
+    _session(monkeypatch)
+    calls = len(graph.calls)
+    out = json.loads(asyncio.run(plugin.teams_thread_read({"since": "hôm qua"})))
+    assert "since" in out["error"] and len(graph.calls) == calls          # no Graph call on bad input
+    out = json.loads(asyncio.run(plugin.teams_thread_read({})))
+    assert out["timezone"].startswith("UTC")
+
+
 def test_tool_refuses_outside_teams_thread(monkeypatch):
     _session(monkeypatch, platform="slack")
     assert "error" in json.loads(asyncio.run(plugin.teams_thread_read({})))
@@ -296,18 +363,6 @@ class FakeRunner:
 
     async def handle(self, event):   # bound method -> adapter._message_handler.__self__ is the runner
         return None
-
-
-def _budget_seen(monkeypatch, adapter):
-    seen = {}
-    real = plugin.tc.compose_context
-
-    async def spy(messages, *, budget_tokens, tail_tokens=None, **kw):
-        seen["budget"], seen["tail"] = budget_tokens, tail_tokens
-        return await real(messages, budget_tokens=budget_tokens, tail_tokens=tail_tokens, **kw)
-    monkeypatch.setattr(plugin.tc, "compose_context", spy)
-    asyncio.run(deliver(adapter, activity("1999"), event()))
-    return seen["budget"]
 
 
 def _hermes_config(monkeypatch, cfg):
@@ -386,7 +441,7 @@ def test_budget_falls_back_when_context_length_unknown(monkeypatch, handler):
         adapter._message_handler = FakeRunner(exc=RuntimeError("boom")).handle
     else:
         adapter._message_handler = None
-    assert _budget_seen(monkeypatch, adapter) == plugin.DEFAULT_BUDGET_TOKENS
+    assert _spy_tail(monkeypatch, adapter)["budget"] == plugin.DEFAULT_BUDGET_TOKENS
 
 
 def test_prompt_tokens_read_via_hermes_entry_lookup(monkeypatch):

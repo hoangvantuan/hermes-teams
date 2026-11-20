@@ -1,4 +1,6 @@
-# teams-threads 0.1.2
+# teams-threads
+
+Version: see `plugin.yaml` (the code's `VERSION` must match; a test checks it).
 
 Hermes plugin: a Microsoft Teams channel thread is one context. When the bot is @mentioned in a
 channel thread, the plugin reads the thread from Microsoft Graph and gives it to the agent as
@@ -8,7 +10,8 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 
 ## Requirements
 
-- Hermes at commit `ae2a81ccc0` (tested). The plugin subclasses the bundled Teams adapter.
+- Hermes at commit `ae2a81ccc0` (tested). The plugin subclasses the bundled Teams adapter. At startup it checks
+  that the adapter still has the methods it relies on; if not, it logs an ERROR and registers the plain Teams adapter.
 - `TEAMS_REQUIRE_MENTION=true`.
 - The Teams app has RSC permission `ChannelMessage.Read.Group` (Application) and is installed in the team.
 - Standard channels only (no private or shared channels).
@@ -18,7 +21,7 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 1. Copy the folder: `scp -r plugin/teams-threads solution:~/.hermes/plugins/` (files: `plugin.yaml`, `__init__.py`, `thread_context.py`, `graph_client.py`).
 2. Make sure `config.yaml` has `plugins.enabled: [..., teams-threads]`.
 3. Restart the gateway: `systemctl --user restart hermes-gateway.service`.
-4. Check `gateway.log` for `[teams-threads] registered ThreadAwareTeamsAdapter v0.1.2` and `✓ teams connected`.
+4. Check `gateway.log` for `[teams-threads] registered ThreadAwareTeamsAdapter v<version>` and `✓ teams connected`.
 
 ## Configuration
 
@@ -32,7 +35,7 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 
 Lines start with `[teams-threads]` and contain only ids and counts, never message text or tokens:
 `root=<id> mode=full|delta fetched=N added=N tokens=N budget=N tail=N`. Graph failures log a WARNING and the bot
-answers without history.
+answers without history. A thread with more than 3000 replies logs a WARNING; the oldest replies beyond that are not read.
 
 ## Rollback
 
@@ -48,7 +51,7 @@ Hermes falls back to the bundled Teams adapter. The watermark stored in session 
 
 ```
 uv venv ~/.venv/hermes-teams
-uv pip install --python ~/.venv/hermes-teams/bin/python pytest pytest-asyncio
+uv pip install --python ~/.venv/hermes-teams/bin/python pytest
 ~/.venv/hermes-teams/bin/python -B -m pytest        # from the repo root; no Hermes needed
 ```
 

@@ -41,6 +41,16 @@ def test_root_id_falls_back_to_activity_id_for_root_message():
     assert tc.resolve_root_id(None, "19:c@thread.tacv2", "333") == ("333", "activity")
 
 
+def test_root_id_not_taken_from_a_reply_activity():
+    # F1: activity.id is the root only when the activity is the root post (no replyToId).
+    assert tc.resolve_root_id(None, "19:c@thread.tacv2", "333", reply_to_id="111") == (None, "none")
+
+
+def test_root_id_from_conversation_helper():
+    assert tc.root_id_from_conversation("19:c@thread.tacv2;messageid=222") == "222"
+    assert tc.root_id_from_conversation("a:1") is None
+
+
 def test_channel_id_strips_messageid_suffix():
     assert tc.channel_id_from_conversation("19:c@thread.tacv2;messageid=222") == "19:c@thread.tacv2"
 
@@ -89,6 +99,15 @@ def test_select_excludes_bot_trigger_system_and_deleted_reply():
     assert [m.id for m in msgs] == [ROOT, "1005"]
     # watermark covers everything seen, including bot/trigger/deleted messages
     assert wm.minute == 5
+
+
+def test_delta_skips_undated_messages():
+    # F10: a message without createdDateTime cannot be placed after the watermark; never re-sent in delta.
+    undated = gm("1009", 9, "no time")
+    undated["createdDateTime"] = None
+    after = datetime(2026, 11, 20, 3, 1, tzinfo=UTC)
+    msgs, _ = tc.select_messages([undated, gm("1002", 2, "new")], root_id=ROOT, bot_app_id=BOT, after=after)
+    assert [m.id for m in msgs] == ["1002"]
 
 
 def test_select_keeps_other_bots():
@@ -151,6 +170,16 @@ def test_compose_fits_budget_verbatim_with_header():
     assert "[03:00 Tuấn]: câu hỏi gốc" in out
     assert out.rstrip().endswith("[Hết ngữ cảnh thread]")
     assert out.index("câu hỏi gốc") < out.index("1 xxx") < out.index("2 xxx")
+
+
+def test_compose_header_names_the_time_zone():
+    out = run(tc.compose_context(_msgs(3), budget_tokens=10_000, summarize=_never, full=True, tz=UTC))
+    assert "Giờ ghi theo múi UTC+00:00." in out.splitlines()[0]
+
+
+def test_zone_label_formats_offset():
+    from datetime import timedelta
+    assert tc.zone_label(timezone(timedelta(hours=7))) == "UTC+07:00"
 
 
 def test_compose_empty_returns_none():

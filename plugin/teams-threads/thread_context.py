@@ -47,15 +47,24 @@ class ThreadMessage:
 
 # ---------------------------------------------------------------- ids (F1)
 
+def root_id_from_conversation(conversation_id: Optional[str]) -> Optional[str]:
+    """Root id from the ``;messageid=`` suffix of a channel-thread conversation id, else None."""
+    match = _MESSAGEID_RE.search(conversation_id or "")
+    return match.group(1) if match else None
+
+
 def resolve_root_id(reply_chain_id: Optional[str], conversation_id: Optional[str],
-                    activity_id: Optional[str]) -> tuple[Optional[str], str]:
-    """Thread root id by priority: replyChain.id, ``;messageid=`` suffix, activity id (root post)."""
+                    activity_id: Optional[str], reply_to_id: Optional[str] = None) -> tuple[Optional[str], str]:
+    """Thread root id by priority (F1): replyChain.id, ``;messageid=`` suffix, activity id when the
+    activity is the root post itself (no ``replyToId``). Returns ``(root_id, source)`` for logging."""
     if reply_chain_id:
         return str(reply_chain_id), "replyChain"
-    match = _MESSAGEID_RE.search(conversation_id or "")
-    if match:
-        return match.group(1), "conversation"
-    return (str(activity_id), "activity") if activity_id else (None, "none")
+    from_conv = root_id_from_conversation(conversation_id)
+    if from_conv:
+        return from_conv, "conversation"
+    if activity_id and not reply_to_id:
+        return str(activity_id), "activity"
+    return None, "none"
 
 
 def channel_id_from_conversation(conversation_id: str) -> str:
@@ -192,8 +201,8 @@ def select_messages(raw: Iterable[dict], *, root_id: str, bot_app_id: str, trigg
         sender, is_own_bot = _sender(message, bot_app_id)
         if (is_own_bot and not include_bot) or mid == trigger_id:
             continue
-        if after is not None and (is_root or (created is not None and created <= after)):
-            continue
+        if after is not None and (is_root or created is None or created <= after):
+            continue   # delta: undated messages cannot be placed after the watermark, so never re-sent
         text = DELETED_ROOT if deleted else message_text(message)
         if text:
             picked.append(ThreadMessage(mid, created, sender, text, is_root))
@@ -217,18 +226,24 @@ def filter_messages(messages: Iterable[ThreadMessage], *, query: Optional[str] =
     return out
 
 
+def _local(dt: datetime, tz) -> datetime:
+    """``dt`` in ``tz``; None = the gateway host's local zone (D9)."""
+    return dt.astimezone(tz) if tz else dt.astimezone()
+
+
+def zone_label(tz=None) -> str:
+    """``UTC+07:00`` style label of ``tz`` (None = host local zone), so readers know what HH:MM means."""
+    offset = _local(datetime.now(timezone.utc), tz).strftime("%z") or "+0000"
+    return f"UTC{offset[:3]}:{offset[3:]}"
+
+
 def format_line(message: ThreadMessage, tz=None) -> str:
-    if message.created is None:
-        stamp = "--:--"
-    else:
-        stamp = (message.created.astimezone(tz) if tz else message.created.astimezone()).strftime("%H:%M")
+    stamp = "--:--" if message.created is None else _local(message.created, tz).strftime("%H:%M")
     return f"[{stamp} {message.sender}]: {message.text}"
 
 
 def _stamp(dt: Optional[datetime], tz) -> str:
-    if dt is None:
-        return "?"
-    return (dt.astimezone(tz) if tz else dt.astimezone()).strftime("%H:%M %d/%m/%Y")
+    return "?" if dt is None else _local(dt, tz).strftime("%H:%M %d/%m/%Y")
 
 
 # ---------------------------------------------------------------- budget (F11)
@@ -307,23 +322,21 @@ async def _map_reduce(lines: list[str], *, target_tokens: int, summarize: Summar
     part_target = max(100, target_tokens // len(chunks))
     gate = asyncio.Semaphore(MAP_CONCURRENCY)   # map calls run in parallel so big threads fit the timeout
 
+    async def ask(text: str, target: int, reduce: bool = False) -> str:
+        answer = (await summarize(build_summary_messages(
+            text, target_tokens=target, count=count, start=start, end=end, reduce=reduce)) or "").strip()
+        if not answer:
+            raise RuntimeError("empty summary")
+        return answer
+
     async def one(chunk: str) -> str:
         async with gate:
-            part = (await summarize(build_summary_messages(
-                chunk, target_tokens=part_target, count=count, start=start, end=end)) or "").strip()
-        if not part:
-            raise RuntimeError("empty summary")
-        return part
+            return await ask(chunk, part_target)
 
     parts = list(await asyncio.gather(*(one(c) for c in chunks)))
     if len(parts) == 1:
         return parts[0]
-    joined = _truncate("\n\n".join(parts), chunk_tokens)
-    merged = (await summarize(build_summary_messages(
-        joined, target_tokens=target_tokens, count=count, start=start, end=end, reduce=True)) or "").strip()
-    if not merged:
-        raise RuntimeError("empty summary")
-    return merged
+    return await ask(_truncate("\n\n".join(parts), chunk_tokens), target_tokens, reduce=True)
 
 
 def _cost(lines: list[str]) -> int:
@@ -334,6 +347,11 @@ def _wrap(header: str, lines: list[str]) -> str:
     return "\n".join([header, *lines, FOOTER])
 
 
+def _header(full: bool, tz) -> str:
+    base = HEADER_FULL if full else HEADER_DELTA
+    return f"{base[:-1]} Giờ ghi theo múi {zone_label(tz)}.]"
+
+
 async def compose_context(messages: list[ThreadMessage], *, budget_tokens: int, summarize: Summarizer,
                           full: bool, tz=None, tail_tokens: Optional[int] = None,
                           chunk_tokens: int = MAP_CHUNK_TOKENS,
@@ -341,11 +359,12 @@ async def compose_context(messages: list[ThreadMessage], *, budget_tokens: int, 
     """The ``channel_context`` block, or None when there is nothing to add.
 
     Fits ``budget_tokens`` -> verbatim. Otherwise compacted like Hermes's ContextCompressor: root
-    pinned (head), newest messages verbatim up to ``tail_tokens`` (Hermes tail budget; default half
-    of the budget), the middle summarized into what is left."""
+    pinned (head, capped at a quarter of the budget so one huge root cannot crowd out the rest; PRD
+    D13), newest messages verbatim up to ``tail_tokens`` (Hermes tail budget; default half of the
+    budget), the middle summarized into what is left."""
     if not messages:
         return None
-    header = HEADER_FULL if full else HEADER_DELTA
+    header = _header(full, tz)
     lines = [format_line(m, tz) for m in messages]
     avail = budget_tokens - _cost([header, FOOTER])
     if _cost(lines) <= avail:

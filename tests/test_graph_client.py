@@ -1,5 +1,6 @@
 """Graph client: token cache, paging, delta early stop, per-channel pacing (N1), 429 Retry-After, errors (F8)."""
 import json
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -151,3 +152,46 @@ def test_transport_exception_becomes_graph_error():
     client = GraphClient("t", "c", "s", http=broken, sleep=lambda s: None, clock=lambda: 0.0)
     with pytest.raises(GraphError):
         client.fetch_thread(TEAM, CHAN, ROOT)
+
+
+def test_401_refreshes_token_once_then_succeeds():
+    client, http, _ = make({
+        root_url(): [(401, {}, {}), (200, {}, msg(ROOT, 0))],
+        replies_url(): [(200, {}, {"value": []})],
+    })
+    got = client.fetch_thread(TEAM, CHAN, ROOT)
+    assert [m["id"] for m in got] == [ROOT]
+    assert sum("login.microsoftonline.com" in c[1] for c in http.calls) == 2      # fresh token fetched
+
+
+def test_401_twice_raises():
+    client, _, _ = make({root_url(): [(401, {}, {})]})
+    with pytest.raises(GraphError) as exc:
+        client.fetch_thread(TEAM, CHAN, ROOT)
+    assert exc.value.status == 401
+
+
+def test_next_link_outside_graph_is_refused():
+    evil = "https://evil.example/steal"
+    client, http, _ = make({
+        root_url(): [(200, {}, msg(ROOT, 0))],
+        replies_url(): [(200, {}, {"value": [msg("1001", 1)], "@odata.nextLink": evil})],
+    })
+    with pytest.raises(GraphError):
+        client.fetch_thread(TEAM, CHAN, ROOT)
+    assert all(c[1] != evil for c in http.calls)                              # token never sent there
+
+
+def test_page_cap_logs_warning(monkeypatch, caplog):
+    import teams_threads.graph_client as gc
+    monkeypatch.setattr(gc, "MAX_PAGES", 2)
+    page2 = f"{BASE}/p2"
+    client, _, _ = make({
+        root_url(): [(200, {}, msg(ROOT, 0))],
+        replies_url(): [(200, {}, {"value": [msg("1003", 3)], "@odata.nextLink": page2})],
+        page2: [(200, {}, {"value": [msg("1002", 2)], "@odata.nextLink": f"{BASE}/p3"})],
+    })
+    with caplog.at_level(logging.WARNING):
+        got = client.fetch_thread(TEAM, CHAN, ROOT)
+    assert len(got) == 3
+    assert any("older ones not read" in r.getMessage() for r in caplog.records)

@@ -17,9 +17,9 @@ from datetime import datetime, timezone
 plugin_dir = sys.argv[1]
 spec = importlib.util.spec_from_file_location("teams_threads", plugin_dir + "/__init__.py",
                                               submodule_search_locations=[plugin_dir])
-p = importlib.util.module_from_spec(spec)
-sys.modules["teams_threads"] = p
-spec.loader.exec_module(p)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules["teams_threads"] = plugin
+spec.loader.exec_module(plugin)
 from plugins.platforms.teams import adapter as base  # noqa: E402
 
 
@@ -27,9 +27,10 @@ def ok(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
 
 
-ok("subclass of real TeamsAdapter", issubclass(p.ThreadAwareTeamsAdapter, base.TeamsAdapter))
-for m in ("_on_message", "handle_message", "_event_session_key", "_is_sender_authorized"):
+ok("subclass of real TeamsAdapter", issubclass(plugin.ThreadAwareTeamsAdapter, base.TeamsAdapter))
+for m in plugin.REQUIRED_BASE_METHODS:
     ok(f"base has {m}", hasattr(base.TeamsAdapter, m))
+ok("startup compatibility check passes", plugin._missing_base_methods() == [])
 calls = {}
 
 
@@ -41,7 +42,7 @@ class Ctx:
         calls["tool"] = kw
 
 
-p.register(Ctx())
+plugin.register(Ctx())
 kw = calls["platform"]
 ok("check_fn from same module", kw["check_fn"] is base.check_requirements)
 ok("ensure_deps_fn from same module", kw["ensure_deps_fn"] is base.check_teams_requirements)
@@ -66,15 +67,15 @@ ok("registry.register accepts is_async", "is_async" in inspect.signature(registr
 from gateway.config import PlatformConfig  # noqa: E402
 cfg = PlatformConfig(enabled=True, extra={"client_id": "app-id", "client_secret": "s", "tenant_id": "t",
                                           "require_mention": True})
-a = kw["adapter_factory"](cfg)
-ok("factory builds ThreadAwareTeamsAdapter", type(a).__name__ == "ThreadAwareTeamsAdapter")
-a._app = None
-a.set_authorization_check(lambda uid, ct, cid, **_: True)
+adapter = kw["adapter_factory"](cfg)
+ok("factory builds ThreadAwareTeamsAdapter", type(adapter).__name__ == "ThreadAwareTeamsAdapter")
+adapter._app = None
+adapter.set_authorization_check(lambda uid, ct, cid, **_: True)
 ROOT, CHAN, TEAM = "1000", "19:c@thread.tacv2", "gid"
 CONV = f"{CHAN};messageid={ROOT}"
 
 
-class G:
+class FakeGraph:
     calls = []
 
     def fetch_thread(self, team, chan, root, *, after=None):
@@ -86,7 +87,7 @@ class G:
         return [msg(ROOT, 0, "root q"), msg("1001", 1, "chao anh bang 3 thu tieng"), msg("1002", 2, "<at>Conan</at>")]
 
 
-a._tt_graph = G()
+adapter._tt_graph = FakeGraph()
 captured = []
 
 
@@ -94,7 +95,7 @@ async def cap(ev):
     captured.append(ev)
 
 
-a._tt_dispatch = cap
+adapter._tt_dispatch = cap
 mention = types.SimpleNamespace(type="mention", mentioned=types.SimpleNamespace(id="28:app-id"))
 act = types.SimpleNamespace(
     id="1002", text="<at>Conan</at>", reply_to_id=None, entities=[mention], attachments=[],
@@ -108,49 +109,49 @@ act = types.SimpleNamespace(
 
 
 async def main():
-    await a._on_message(types.SimpleNamespace(activity=act, conversation_ref=None))
-    await a._tt_drain()
+    await adapter._on_message(types.SimpleNamespace(activity=act, conversation_ref=None))
+    await adapter._tt_drain()
 
 
 asyncio.run(main())
-ok("graph called with team/channel/root", G.calls and G.calls[0][:3] == (TEAM, CHAN, ROOT))
+ok("graph called with team/channel/root", FakeGraph.calls and FakeGraph.calls[0][:3] == (TEAM, CHAN, ROOT))
 ev = captured[0] if captured else None
 ok("event dispatched with channel_context", ev is not None and "chao anh bang 3 thu tieng" in (ev.channel_context or ""))
 ok("F3 empty mention text", ev is not None and ev.text == "(được gọi trong thread, không kèm nội dung)")
-key = a._event_session_key(ev)
+key = adapter._event_session_key(ev)
 ok("session key keeps ;messageid=root", f";messageid={ROOT}" in key)
 tokens = set_session_vars(platform="teams", chat_id=CONV)
 try:
-    out = json.loads(asyncio.run(p.teams_thread_read({"query": "3 thu"})))
+    out = json.loads(asyncio.run(plugin.teams_thread_read({"query": "3 thu"})))
 finally:
     clear_session_vars(tokens)
 ok("tool reads current thread via real session vars", out.get("count") == 1)
 
-# TC5 against the REAL mention gate: a reply without @mention must not reach Graph nor dispatch.
-G.calls.clear()
+# TC5 against the REAL mention gate: adapter reply without @mention must not reach Graph nor dispatch.
+FakeGraph.calls.clear()
 captured.clear()
 silent = types.SimpleNamespace(**{**vars(act), "id": "1003", "text": "oke luôn", "entities": []})
 
 
 async def deliver(activity):
-    await a._on_message(types.SimpleNamespace(activity=activity, conversation_ref=None))
-    await a._tt_drain()
+    await adapter._on_message(types.SimpleNamespace(activity=activity, conversation_ref=None))
+    await adapter._tt_drain()
 
 
 asyncio.run(deliver(silent))
-ok("TC5 no mention: no Graph call, no dispatch", G.calls == [] and captured == [])
+ok("TC5 no mention: no Graph call, no dispatch", FakeGraph.calls == [] and captured == [])
 
 # F12a through the REAL tool registry dispatcher (arg validation, result normalisation, async bridge).
-registry.register(name=p.TOOL_NAME, toolset="teams", schema=p.TOOL_SCHEMA, handler=p.teams_thread_read,
+registry.register(name=plugin.TOOL_NAME, toolset="teams", schema=plugin.TOOL_SCHEMA, handler=plugin.teams_thread_read,
                   is_async=True, description="smoke")
 tokens = set_session_vars(platform="teams", chat_id=CONV)
 try:
-    res = registry.dispatch(p.TOOL_NAME, {"query": "3 thu"})
+    res = registry.dispatch(plugin.TOOL_NAME, {"query": "3 thu"})
     out = json.loads(res) if isinstance(res, str) else res
     ok("registry.dispatch from plain thread", out.get("count") == 1)
 
     async def in_loop():
-        r = registry.dispatch(p.TOOL_NAME, {"query": "3 thu"})
+        r = registry.dispatch(plugin.TOOL_NAME, {"query": "3 thu"})
         return json.loads(r) if isinstance(r, str) else r
     ok("registry.dispatch inside running loop", asyncio.run(in_loop()).get("count") == 1)
 finally:

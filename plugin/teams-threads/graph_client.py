@@ -1,13 +1,16 @@
 """Small synchronous Microsoft Graph client for reading one channel thread.
 
 App-only token (client credentials, cached until expiry), ``@odata.nextLink`` paging, at most one
-request per second per channel (N1), ``Retry-After`` on 429, 5 s per request. Synchronous on purpose:
+request per second per channel (N1), ``Retry-After`` on 429, one retry with a fresh token on 401,
+5 s per request. ``@odata.nextLink`` must stay on the Graph host (the bearer token is sent to it).
+Synchronous on purpose:
 callers run it via ``asyncio.to_thread``, so no event-loop-bound state is shared between the gateway
 loop and the worker loop Hermes uses for async tools. All failures surface as ``GraphError`` (F8).
 """
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.error
@@ -18,10 +21,12 @@ from typing import Callable, Optional
 
 from .thread_context import parse_time
 
+logger = logging.getLogger(__name__)
+
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPE = "https://graph.microsoft.com/.default"
 PAGE_SIZE = 50                 # $top maximum for /replies
-MAX_PAGES = 60                 # hard stop: 3000 replies
+MAX_PAGES = 60                 # hard stop: 3000 replies (oldest beyond it are dropped, WARNING logged)
 DEFAULT_RETRY_AFTER = 2.0
 MAX_RETRY_AFTER = 10.0         # longer waits: give up and answer without history
 MAX_ATTEMPTS = 3
@@ -97,6 +102,7 @@ class GraphClient:
             self._sleep(wait)
 
     def _get(self, url: str, channel_id: str) -> dict:
+        refreshed = False
         for _attempt in range(MAX_ATTEMPTS):
             token = self._access_token()
             self._pace(channel_id)
@@ -111,13 +117,16 @@ class GraphClient:
             if status == 401:
                 with self._lock:
                     self._token = None
+                if not refreshed:      # revoked/rotated token: one retry with a fresh one
+                    refreshed = True
+                    continue
             if not 200 <= status < 300:
                 raise GraphError("Graph request failed", status)
             try:
                 return json.loads(raw or b"{}")
             except ValueError:
                 raise GraphError("Graph response is not JSON", status) from None
-        raise GraphError("throttled, retries exhausted", 429)
+        raise GraphError("retries exhausted", status)
 
     # ------------------------------------------------------------ API
     def fetch_thread(self, team_id: str, channel_id: str, root_id: str, *,
@@ -132,16 +141,26 @@ class GraphClient:
             messages.append(self._get(base, channel_id))
         url: Optional[str] = f"{base}/replies?$top={PAGE_SIZE}"
         for _page in range(MAX_PAGES):
-            if not url:
-                break
             payload = self._get(url, channel_id)
             page = [m for m in payload.get("value") or [] if isinstance(m, dict)]
             messages.extend(page)
-            url = payload.get("@odata.nextLink")
-            if after is not None and page and all(
-                    (t := parse_time(m.get("createdDateTime"))) is not None and t <= after for m in page):
-                break
+            url = _next_link(payload)
+            if not url or (after is not None and page and all(
+                    (t := parse_time(m.get("createdDateTime"))) is not None and t <= after for m in page)):
+                return messages
+        logger.warning("[teams-threads] thread %s has more than %d replies; older ones not read",
+                       root_id, MAX_PAGES * PAGE_SIZE)
         return messages
+
+
+def _next_link(payload: dict) -> Optional[str]:
+    """``@odata.nextLink``, only when it points back at Graph; the bearer token must not leave Graph."""
+    link = payload.get("@odata.nextLink")
+    if not link:
+        return None
+    if not (isinstance(link, str) and link.startswith(GRAPH + "/")):
+        raise GraphError("nextLink outside Microsoft Graph")
+    return link
 
 
 def _retry_after(headers: dict) -> float:
