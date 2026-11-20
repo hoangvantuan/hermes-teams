@@ -47,3 +47,16 @@ Anh Tuấn: mention bot ở tin gốc của thread mới; sửa tin gốc `17951
 | Tin bị sửa trong Graph | Có `lastEditedDateTime`, `body` là nội dung mới | `1795145902383`: `lastEditedDateTime=2026-11-20T03:43:59.955Z` |
 | Tin gốc bị xoá trong Graph | Vẫn trả về trong `/messages`, có `deletedDateTime`, `body` rỗng; các tin trả lời vẫn đọc được | `1795145910429`: `deletedDateTime=2026-11-20T03:43:53.115Z` |
 | Bot có nhận sự kiện sửa/xoá | **Không thấy trong log** | `gateway.log`, `agent.log`, `errors.log` không có dòng nào sau 03:43:51. Có thể adapter bỏ qua im lặng. |
+
+## Lần thử 3 — cổng C2 (04:00 UTC, plugin `teams-threads` v0.0.1)
+
+Anh Tuấn trả lời "oke luôn" (Graph: `mentions=[]`, **không** mention) vào thread `1795146225973`.
+
+| Mục | Kết luận | Bằng chứng |
+|---|---|---|
+| Teams đẩy tin **không mention** tới bot khi có RSC | **Đúng** | `aiohttp.access` 04:00:17 `POST /api/messages 200`; log plugin `[teams-threads] inbound {...}` |
+| Bộ lọc mention gốc bỏ tin đó | **Đúng** | Không có dòng `gateway.run: inbound message` / `response ready` sau 04:00:17 |
+| `activity.id` = Graph message id | **Đúng** | `activity_id=1795147215633` = Graph id `1795147215633` |
+| `channelData.replyChain.id` có trong activity | **Đúng** | `reply_chain_id=1795146225973` (= id tin gốc) |
+| `channelData.team.aadGroupId` có trong activity | **Đúng** | `team_aad_group_id=2670e8c8-…` |
+| `reply_to_id` của tin trả lời trong channel | **`None`** | Ngoại lệ `_sent_ids` của adapter gốc không bao giờ áp dụng trong channel |

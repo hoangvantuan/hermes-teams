@@ -1,6 +1,6 @@
 # PRD: `teams-threads`, plugin Hermes cho thread trong channel Microsoft Teams
 
-- Trạng thái: **Bản nháp v0.5** (nén tự động dùng chung tuyến `compression` của Hermes). Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
+- Trạng thái: **v0.6 — đã qua cả 3 cổng C1–C3, sẵn sàng viết mã**. Trước đó: v0.5 (nén tự động dùng chung tuyến `compression` của Hermes). Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
 - Quyết định 2026-11-20 (anh Tuấn): **bot chỉ trả lời khi được mention, không tự theo thread**, để tránh rối khi nhiều tin.
 - Ngày: 2026-11-20
 - Chủ sở hữu: anh Tuấn
@@ -144,8 +144,8 @@ Tất cả tiêu chí được thử trong channel `sol-personal-tuanhv`. Phần
 | Cổng | Câu hỏi | Cách kiểm tra | Ảnh hưởng |
 |---|---|---|---|
 | C1 ✅ | Tin gốc có mention và tin trả lời trong cùng thread có cùng khoá session không? **Đã qua** (verify-live lần 2): cả hai đều dùng id tin gốc. | Anh Tuấn mention bot ở tin gốc của một thread mới, rồi mention ở một tin trả lời. Em so 2 dòng `session=` trong `gateway.log`. | Khác khoá thì F1 phải đổi khoá session |
-| C2 | `activity.id` của tin kích hoạt có bằng Graph ID không (để loại tin kích hoạt khỏi phần đọc bù)? Việc Teams có gửi tin không mention hay không **không còn ảnh hưởng** sau quyết định ở đầu tài liệu. | Bản dựng đầu tiên của plugin ghi log `activity.id`, `replyToId`, `replyChain` của tin kích hoạt, rồi so với Graph | Khác nhau thì loại tin kích hoạt bằng cách so nội dung và thời điểm gửi |
-| C3 | Gateway có khởi động và kết nối được bằng lớp con không? Có bị nạp hai bản module adapter không? | Cài một plugin rỗng (lớp con chưa có logic). Khởi động lại gateway, xem dòng `✓ teams connected` và nhắn thử trong DM. | Gãy thì gỡ plugin. Phương án dự phòng là sửa thẳng mã Hermes và gửi PR (đề xuất thay đổi mã) lên dự án gốc. |
+| C2 ✅ | **Đã qua** (verify-live lần 3). `activity.id` của tin kích hoạt có bằng Graph ID không (để loại tin kích hoạt khỏi phần đọc bù)? Việc Teams có gửi tin không mention hay không **không còn ảnh hưởng** sau quyết định ở đầu tài liệu. | Bản dựng đầu tiên của plugin ghi log `activity.id`, `replyToId`, `replyChain` của tin kích hoạt, rồi so với Graph | Khác nhau thì loại tin kích hoạt bằng cách so nội dung và thời điểm gửi |
+| C3 ✅ | **Đã qua** (gateway 03:54:43 kết nối bằng lớp con, log `plugins.platforms.teams.adapter`). Gateway có khởi động và kết nối được bằng lớp con không? Có bị nạp hai bản module adapter không? | Cài một plugin rỗng (lớp con chưa có logic). Khởi động lại gateway, xem dòng `✓ teams connected` và nhắn thử trong DM. | Gãy thì gỡ plugin. Phương án dự phòng là sửa thẳng mã Hermes và gửi PR (đề xuất thay đổi mã) lên dự án gốc. |
 
 ## 10. Rủi ro
 
