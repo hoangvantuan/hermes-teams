@@ -1,6 +1,6 @@
 # PRD: `teams-threads`, plugin Hermes cho thread trong channel Microsoft Teams
 
-- Trạng thái: **v0.6 — đã qua cả 3 cổng C1–C3, sẵn sàng viết mã**. Trước đó: v0.5 (nén tự động dùng chung tuyến `compression` của Hermes). Đã qua cổng C1; còn C2 và C3 ở mục 9 trước khi viết mã đầy đủ.
+- Trạng thái: **v0.7 — đã viết mã plugin v0.1.0** (`plugin/teams-threads/`, test tự động ở `tests/`). Còn thử thật TC1–TC10. Các điểm khác với bản v0.6 ghi ở mục 12. Trước đó: v0.6 (qua cả 3 cổng C1–C3).
 - Quyết định 2026-11-20 (anh Tuấn): **bot chỉ trả lời khi được mention, không tự theo thread**, để tránh rối khi nhiều tin.
 - Ngày: 2026-11-20
 - Chủ sở hữu: anh Tuấn
@@ -117,7 +117,7 @@ Mã nguồn tham chiếu: `plugins/platforms/slack/adapter.py` ở commit `ae2a8
 | Khoá | Mặc định | Ý nghĩa |
 |---|---|---|
 | `TEAMS_REQUIRE_MENTION` | `true` (đã bật trên `solution`) | Bắt buộc phải có khi bật RSC. Nếu tắt, bot trả lời mọi tin. |
-| `TEAMS_THREAD_BUDGET_RATIO` | `0.10` | Tỉ lệ cửa sổ ngữ cảnh dành cho một lần đưa lịch sử vào (F11). |
+| `TEAMS_THREAD_BUDGET_TOKENS` | `12000` | Số token tối đa cho một lần đưa lịch sử vào (F11). Thay cho `TEAMS_THREAD_BUDGET_RATIO`, xem mục 12. |
 | `auxiliary.compression` (có sẵn của Hermes) | theo cấu hình hiện tại | Model tóm tắt, dùng chung với bộ nén session (F11). |
 | `plugins.enabled` | thêm `teams-threads` | Bật plugin. |
 
@@ -161,3 +161,25 @@ Tất cả tiêu chí được thử trong channel `sol-personal-tuanhv`. Phần
 - Quyền RSC đã có hiệu lực cho cả team `2670e8c8-…`. Các team khác chỉ có quyền khi anh cài app vào.
 - Chưa thử trường hợp tin bị sửa hoặc xoá. Bản v1 bỏ qua tin đã xoá. Tin bị sửa sau khi đã vào ngữ cảnh thì không được cập nhật.
 - `teams app doctor` báo 4 lỗi về SSO. Hermes không dùng SSO nên không cần xử lý.
+
+## 12. Sai khác khi viết mã v0.1.0 (2026-11-20)
+
+| # | PRD v0.6 | Bản mã v0.1.0 | Lý do |
+|---|---|---|---|
+| D1 | F11: ngân sách = `TEAMS_THREAD_BUDGET_RATIO` × cửa sổ ngữ cảnh của model | Ngân sách cố định `TEAMS_THREAD_BUDGET_TOKENS`, mặc định 12000 token (≈ 0,10 × 128K), tối thiểu 1000 | Adapter không biết model mà session đang dùng. Gateway không gọi `get_model_context_length` (`agent/model_metadata.py:2208`); model được chọn trong agent và có thể đổi theo session (`/model`). Ước lượng token = số ký tự / 4, giống Hermes. |
+| D2 | F6: dấu đọc = thời điểm lớn nhất của các tin **đưa vào ngữ cảnh** | Dấu đọc = thời điểm lớn nhất của **mọi tin đã thấy** trong lần đọc: cả tin kích hoạt, tin của bot, tin đã xoá. Nếu Graph chưa có tin kích hoạt thì dùng `activity.timestamp` | Nếu không tính tin kích hoạt, ở lần mention sau tin đó sẽ quay lại như lịch sử, bị lặp (Slack cũng đặt dấu đọc bằng `ts` của tin kích hoạt). |
+| D3 | F6: dấu đọc lưu vào metadata session | Như cũ, cộng thêm bản tạm trong bộ nhớ | Ở lượt đầu, session chưa tồn tại lúc plugin chạy, nên `set_session_metadata` trả về `False` (`gateway/session_lifecycle.py:171`). Plugin giữ dấu đọc trong bộ nhớ và ghi lại sau khi gửi tin đi (thử sau 1, 2, 3, 5, 10 giây). Nếu ghi không được, lần mention sau vẫn dùng bản trong bộ nhớ. |
+| D4 | F8: lỗi khi Graph "quá 5 giây" | 5 giây cho **mỗi** lệnh gọi Graph | Thread 200 tin cần 1 lệnh lấy tin gốc + 4 trang, mỗi trang cách nhau 1 giây theo N1, nên tổng thời gian luôn quá 5 giây. Lỗi 429 có `Retry-After` > 10 giây thì bỏ, trả lời không kèm lịch sử. |
+| D5 | Mục 6: đọc lịch sử trong `handle_message` | Đọc lịch sử trong một tác vụ nền, mỗi session chạy lần lượt | SDK Teams chỉ trả HTTP 200 cho Bot Framework sau khi hàm xử lý tin chạy xong (`microsoft_teams/apps/http/http_server.py`). Tóm tắt thread dài có thể mất nhiều giây. Khoá theo session giữ đúng thứ tự giữa các lần mention. |
+| D6 | (chưa nêu) | Không đọc Graph khi: tin là lệnh (`/new`, `/status`…), hoặc người gửi chưa được cho phép (`_is_sender_authorized` khác `True`) | Lệnh không cần lịch sử và nếu đọc thì dấu đọc bị đẩy lên, làm mất phần đọc bù. Người chưa được phép không được làm bot tốn lượt gọi Graph. |
+| D7 | F5 | Khi đọc phần mới, plugin không lấy lại tin gốc và dừng lật trang khi cả trang đã cũ hơn dấu đọc | Graph trả tin trả lời theo thứ tự mới trước ([verify-live]); đỡ tốn lượt gọi (N1). |
+| D8 | F11: tóm tắt bằng `async_call_llm(task="compression")` | Như cũ, nhưng không truyền `main_runtime` | Plugin không có runtime của model chính. Nếu `auxiliary.compression` không tự chọn được model thì lệnh gọi lỗi, plugin quay về cắt bớt (TC8b). **Cần thử thật ở TC8.** |
+| D9 | F10: `[HH:MM tên]` | Giờ theo múi giờ của máy chạy gateway | Hermes không truyền múi giờ người dùng cho adapter. |
+| D10 | F12a | Công cụ `teams_thread_read` thuộc toolset `teams` (bộ `hermes-teams` mặc định tự gồm nó). Team id lấy từ bộ nhớ, được ghi khi bot được mention trong thread đó ở tiến trình hiện tại | Biến session của Hermes không có team id. Sau khi gateway khởi động lại, công cụ chỉ chạy được sau lần mention đầu tiên — mà mỗi lượt đều bắt đầu bằng một mention, nên thực tế luôn có. |
+
+### Mức độ kiểm chứng
+
+- Test tự động (pytest, không cần Hermes): F1 (3 nguồn id), F3, F4–F8, F9, F10, F11 (vừa ngân sách, vượt ngân sách, map-reduce, LLM phụ lỗi, quá thời gian), F12, F12a, N1 (1 lệnh/giây, `Retry-After`), N3 (log không chứa nội dung), TC10 (DM, group chat không gọi Graph).
+- Smoke test trên `solution` với mã Hermes thật (`tests/smoke_hermes.py`, chạy trong thư mục tạm, đã xoá): đăng ký nền tảng, đường `_on_message` thật → `MessageEvent.channel_context`, khoá session giữ `;messageid=`, công cụ đọc biến session thật.
+- Chỉ thử được trên Teams thật: TC1–TC9. Riêng TC8 phải xác nhận công cụ hiện ra trong session Teams và tuyến `compression` chạy được không có `main_runtime`.
+

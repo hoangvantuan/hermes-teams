@@ -151,9 +151,10 @@ def test_watermark_written_after_session_appears_and_used_next_time():
 
 
 def test_pending_watermark_used_when_store_write_failed():
-    graph = FakeGraph([gm(ROOT, 0, "root"), gm("1001", 1, "a"), gm("1002", 2, "new")])
+    graph = FakeGraph([gm(ROOT, 0, "root"), gm("1001", 1, "a")])
     adapter = make_adapter(graph, FakeStore())          # entry never appears
     asyncio.run(deliver(adapter, activity("1001", minute=1), event()))
+    graph.messages.append(gm("1002", 2, "new"))
     ev = asyncio.run(deliver(adapter, activity("1003", minute=3), event()))
     assert graph.calls[1][3] is not None                # delta, not a second full fetch
     assert "new" in ev.channel_context and "root" not in ev.channel_context
