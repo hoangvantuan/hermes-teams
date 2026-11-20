@@ -125,3 +125,33 @@ try:
 finally:
     clear_session_vars(tokens)
 ok("tool reads current thread via real session vars", out.get("count") == 1)
+
+# TC5 against the REAL mention gate: a reply without @mention must not reach Graph nor dispatch.
+G.calls.clear()
+captured.clear()
+silent = types.SimpleNamespace(**{**vars(act), "id": "1003", "text": "oke luôn", "entities": []})
+
+
+async def deliver(activity):
+    await a._on_message(types.SimpleNamespace(activity=activity, conversation_ref=None))
+    await a._tt_drain()
+
+
+asyncio.run(deliver(silent))
+ok("TC5 no mention: no Graph call, no dispatch", G.calls == [] and captured == [])
+
+# F12a through the REAL tool registry dispatcher (arg validation, result normalisation, async bridge).
+registry.register(name=p.TOOL_NAME, toolset="teams", schema=p.TOOL_SCHEMA, handler=p.teams_thread_read,
+                  is_async=True, description="smoke")
+tokens = set_session_vars(platform="teams", chat_id=CONV)
+try:
+    res = registry.dispatch(p.TOOL_NAME, {"query": "3 thu"})
+    out = json.loads(res) if isinstance(res, str) else res
+    ok("registry.dispatch from plain thread", out.get("count") == 1)
+
+    async def in_loop():
+        r = registry.dispatch(p.TOOL_NAME, {"query": "3 thu"})
+        return json.loads(r) if isinstance(r, str) else r
+    ok("registry.dispatch inside running loop", asyncio.run(in_loop()).get("count") == 1)
+finally:
+    clear_session_vars(tokens)

@@ -246,3 +246,32 @@ def test_tool_refuses_outside_teams_thread(monkeypatch):
     assert "error" in json.loads(asyncio.run(plugin.teams_thread_read({})))
     _session(monkeypatch, chat_id="a:1")
     assert "error" in json.loads(asyncio.run(plugin.teams_thread_read({})))
+
+
+def test_slash_command_in_thread_drops_unpersisted_watermark():
+    """/new after a first turn whose watermark never persisted: next mention must re-read the full thread."""
+    graph = FakeGraph([gm(ROOT, 0, "root"), gm("1001", 1, "a")])
+    adapter = make_adapter(graph, FakeStore())
+    asyncio.run(deliver(adapter, activity("1001", minute=1), event()))
+    assert adapter._tt_pending
+    asyncio.run(deliver(adapter, activity("1002", minute=2), event("/new")))
+    assert adapter._tt_pending == {}
+
+
+def test_flush_gives_up_with_warning(caplog):
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]), FakeStore())
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(deliver(adapter, activity("1001", minute=1), event()))
+    assert any("watermark not persisted" in r.getMessage() for r in caplog.records)
+
+
+def test_dispatch_failure_is_logged(caplog):
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]), FakeStore(existing=[key()]))
+
+    async def boom(_ev):
+        raise RuntimeError("runner exploded")
+
+    adapter._tt_dispatch = boom
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(deliver(adapter, activity("1001", minute=1), event()))
+    assert any("dispatch failed" in r.getMessage() for r in caplog.records)

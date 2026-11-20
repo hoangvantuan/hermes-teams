@@ -83,6 +83,8 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         activity = _CURRENT_ACTIVITY.get()
         info = self._tt_thread_info(activity) if activity is not None else None
         if info is None or not self._tt_should_hydrate(event):
+            if info is not None and (getattr(event, "text", None) or "").lstrip().startswith("/"):
+                self._tt_forget_pending(event)   # /new etc.: an unpersisted watermark must not outlive it
             return await super().handle_message(event)
         # Hydrate off the webhook path: the Bot Framework POST is answered when _on_message returns.
         task = asyncio.create_task(self._tt_hydrate_and_dispatch(event, activity, info))
@@ -127,7 +129,19 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
             return False
 
     # ------------------------------------------------------------------ flow
+    def _tt_forget_pending(self, event) -> None:
+        try:
+            self._tt_pending.pop(self._event_session_key(event), None)
+        except Exception:
+            logger.debug("[teams-threads] could not derive session key", exc_info=True)
+
     async def _tt_hydrate_and_dispatch(self, event, activity, info: dict) -> None:
+        try:
+            await self._tt_hydrate_and_dispatch_inner(event, activity, info)
+        except Exception:
+            logger.error("[teams-threads] dispatch failed for root %s", info.get("root_id"), exc_info=True)
+
+    async def _tt_hydrate_and_dispatch_inner(self, event, activity, info: dict) -> None:
         try:
             key = self._event_session_key(event)
         except Exception:
@@ -212,6 +226,7 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
                 return   # superseded by a newer turn
             if await self._tt_store_watermark(key, watermark):
                 return
+        logger.warning("[teams-threads] watermark not persisted for session %s; kept in memory only", key)
 
     def _tt_graph_client(self) -> GraphClient:
         if self._tt_graph is None:
