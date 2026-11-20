@@ -275,3 +275,74 @@ def test_dispatch_failure_is_logged(caplog):
     with caplog.at_level(logging.ERROR):
         asyncio.run(deliver(adapter, activity("1001", minute=1), event()))
     assert any("dispatch failed" in r.getMessage() for r in caplog.records)
+
+
+# ---------- D1: budget follows the active model's context window ----------
+
+class FakeRunner:
+    def __init__(self, ctx_len=None, exc=None):
+        self.ctx_len, self.exc, self.calls = ctx_len, exc, []
+
+    async def _inbound_model_context_length(self, source, session_key):
+        self.calls.append(session_key)
+        if self.exc:
+            raise self.exc
+        return self.ctx_len
+
+    async def handle(self, event):   # bound method -> adapter._message_handler.__self__ is the runner
+        return None
+
+
+def _budget_seen(monkeypatch, adapter):
+    seen = {}
+    real = plugin.tc.compose_context
+
+    async def spy(messages, *, budget_tokens, **kw):
+        seen["budget"] = budget_tokens
+        return await real(messages, budget_tokens=budget_tokens, **kw)
+    monkeypatch.setattr(plugin.tc, "compose_context", spy)
+    asyncio.run(deliver(adapter, activity("1999"), event()))
+    return seen["budget"]
+
+
+def test_budget_is_ratio_of_model_context(monkeypatch):
+    monkeypatch.delenv("TEAMS_THREAD_BUDGET_TOKENS", raising=False)
+    monkeypatch.delenv("TEAMS_THREAD_BUDGET_RATIO", raising=False)
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
+    runner = FakeRunner(ctx_len=200_000)
+    adapter._message_handler = runner.handle
+    assert _budget_seen(monkeypatch, adapter) == 20_000
+    assert runner.calls == [key()]
+
+
+def test_budget_ratio_env(monkeypatch):
+    monkeypatch.delenv("TEAMS_THREAD_BUDGET_TOKENS", raising=False)
+    monkeypatch.setenv("TEAMS_THREAD_BUDGET_RATIO", "0.25")
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
+    adapter._message_handler = FakeRunner(ctx_len=1_000_000).handle
+    assert _budget_seen(monkeypatch, adapter) == 250_000
+
+
+def test_fixed_budget_env_overrides_ratio(monkeypatch):
+    monkeypatch.setenv("TEAMS_THREAD_BUDGET_TOKENS", "5000")
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
+    runner = FakeRunner(ctx_len=200_000)
+    adapter._message_handler = runner.handle
+    assert _budget_seen(monkeypatch, adapter) == 5000
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("handler", [None, "no-runner", "error"])
+def test_budget_falls_back_when_context_length_unknown(monkeypatch, handler):
+    monkeypatch.delenv("TEAMS_THREAD_BUDGET_TOKENS", raising=False)
+    monkeypatch.delenv("TEAMS_THREAD_BUDGET_RATIO", raising=False)
+    adapter = make_adapter(FakeGraph([gm(ROOT, 0, "root")]))
+    if handler == "no-runner":
+        async def plain(_e):
+            return None
+        adapter._message_handler = plain
+    elif handler == "error":
+        adapter._message_handler = FakeRunner(exc=RuntimeError("boom")).handle
+    else:
+        adapter._message_handler = None
+    assert _budget_seen(monkeypatch, adapter) == plugin.DEFAULT_BUDGET_TOKENS

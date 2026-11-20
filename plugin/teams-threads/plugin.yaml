@@ -1,6 +1,6 @@
 name: teams-threads
 kind: platform
-version: 0.1.0
+version: 0.1.1
 description: >
   Teams channel thread = one context. When the bot is @mentioned in a channel thread, the
   thread is read from Microsoft Graph (full once, then only newer messages) and attached as

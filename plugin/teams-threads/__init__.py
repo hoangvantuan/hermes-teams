@@ -23,9 +23,11 @@ from .graph_client import GraphClient, GraphError
 
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 WATERMARK_KEY = "teams_thread_watermark"
-DEFAULT_BUDGET_TOKENS = 12_000
+DEFAULT_BUDGET_TOKENS = 12_000          # fallback when the model's context window is unknown
+DEFAULT_BUDGET_RATIO = 0.10
+MIN_BUDGET_TOKENS = 1_000
 TOOL_NAME = "teams_thread_read"
 TOOL_MAX_CHARS = 40_000
 
@@ -33,15 +35,28 @@ _CURRENT_ACTIVITY: contextvars.ContextVar = contextvars.ContextVar("teams_thread
 _LIVE_ADAPTER: Optional["ThreadAwareTeamsAdapter"] = None   # one Teams adapter per gateway process
 
 
-def _budget_tokens(config) -> int:
+def _fixed_budget_tokens(config) -> Optional[int]:
+    """Explicit fixed budget (``TEAMS_THREAD_BUDGET_TOKENS`` / ``extra.thread_budget_tokens``) or None."""
     extra = getattr(config, "extra", None) or {}
     raw = os.getenv("TEAMS_THREAD_BUDGET_TOKENS") or extra.get("thread_budget_tokens")
+    if raw in (None, ""):
+        return None
     try:
-        value = int(raw) if raw not in (None, "") else DEFAULT_BUDGET_TOKENS
+        return max(MIN_BUDGET_TOKENS, int(raw))
     except (TypeError, ValueError):
-        logger.warning("[teams-threads] invalid TEAMS_THREAD_BUDGET_TOKENS; using %d", DEFAULT_BUDGET_TOKENS)
-        value = DEFAULT_BUDGET_TOKENS
-    return max(1_000, value)
+        logger.warning("[teams-threads] invalid TEAMS_THREAD_BUDGET_TOKENS; using the context ratio")
+        return None
+
+
+def _budget_ratio(config) -> float:
+    extra = getattr(config, "extra", None) or {}
+    raw = os.getenv("TEAMS_THREAD_BUDGET_RATIO") or extra.get("thread_budget_ratio")
+    try:
+        value = float(raw) if raw not in (None, "") else DEFAULT_BUDGET_RATIO
+    except (TypeError, ValueError):
+        logger.warning("[teams-threads] invalid TEAMS_THREAD_BUDGET_RATIO; using %.2f", DEFAULT_BUDGET_RATIO)
+        value = DEFAULT_BUDGET_RATIO
+    return min(max(value, 0.01), 0.40)
 
 
 def _as_utc(value: Any) -> Optional[datetime]:
@@ -62,7 +77,8 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         super().__init__(config, *args, **kwargs)
         self._tt_graph: Optional[GraphClient] = None
         self._tt_summarize = _aux_summarize
-        self._tt_budget_tokens = _budget_tokens(config)
+        self._tt_budget_tokens = _fixed_budget_tokens(config)   # None -> ratio of the model's window
+        self._tt_budget_ratio = _budget_ratio(config)
         self._tt_locks: dict[str, asyncio.Lock] = {}
         self._tt_pending: dict[str, datetime] = {}      # session key -> watermark not yet persisted
         self._tt_tasks: set[asyncio.Task] = set()
@@ -128,6 +144,23 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         except Exception:
             return False
 
+    async def _tt_budget(self, event, key: str) -> int:
+        """Token budget for one history injection: fixed override, else ratio x the context window of
+        the model this turn runs on (same resolver the gateway runner uses, incl. /model overrides;
+        precedent: gateway/session_context_refs.py:51), else DEFAULT_BUDGET_TOKENS."""
+        if self._tt_budget_tokens is not None:
+            return self._tt_budget_tokens
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        resolver = getattr(runner, "_inbound_model_context_length", None)
+        if callable(resolver):
+            try:
+                ctx_len = int(await resolver(getattr(event, "source", None), key))
+                if ctx_len > 0:
+                    return max(MIN_BUDGET_TOKENS, int(ctx_len * self._tt_budget_ratio))
+            except Exception:
+                logger.debug("[teams-threads] context length lookup failed", exc_info=True)
+        return DEFAULT_BUDGET_TOKENS
+
     # ------------------------------------------------------------------ flow
     def _tt_forget_pending(self, event) -> None:
         try:
@@ -178,7 +211,8 @@ class ThreadAwareTeamsAdapter(base.TeamsAdapter):
         self._tt_thread_teams[info["conv_id"]] = info["team_id"]
         messages, seen_wm = tc.select_messages(raw, root_id=info["root_id"], bot_app_id=self._client_id,
                                                trigger_id=trigger_id, after=after)
-        context = await tc.compose_context(messages, budget_tokens=self._tt_budget_tokens,
+        budget = await self._tt_budget(event, key)
+        context = await tc.compose_context(messages, budget_tokens=budget,
                                            summarize=self._tt_summarize, full=after is None)
         if context:
             event.channel_context = context

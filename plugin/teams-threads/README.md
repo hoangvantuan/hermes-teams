@@ -24,7 +24,8 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `TEAMS_THREAD_BUDGET_TOKENS` (in `~/.hermes/.env`) | `12000` | Max tokens of thread history added in one turn (min 1000). Above it: root + newest messages verbatim, middle summarized. |
+| `TEAMS_THREAD_BUDGET_RATIO` (in `~/.hermes/.env`) | `0.10` | Share of the active model's context window for thread history added in one turn (clamped 0.01–0.40). Above it: root + newest messages verbatim, middle summarized. |
+| `TEAMS_THREAD_BUDGET_TOKENS` (in `~/.hermes/.env`) | unset | Fixed budget instead of the ratio (min 1000). If the context window cannot be resolved, 12000 is used. |
 | `auxiliary.compression` (Hermes) | current config | Model used for the summary (same route as session compression). |
 | `TEAMS_CLIENT_ID/SECRET/TENANT_ID` | existing | Reused for the Graph app-only token. |
 
