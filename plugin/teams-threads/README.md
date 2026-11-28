@@ -18,10 +18,22 @@ DMs and group chats behave exactly as without the plugin. Spec: `docs/PRD.md`.
 
 ## Install
 
-1. Copy the folder: `scp -r plugin/teams-threads solution:~/.hermes/plugins/` (files: `plugin.yaml`, `__init__.py`, `thread_context.py`, `graph_client.py`).
-2. Make sure `config.yaml` has `plugins.enabled: [..., teams-threads]`.
-3. Restart the gateway: `systemctl --user restart hermes-gateway.service`.
+The plugin lives in a subdirectory of this repo. Install it from Git on the Hermes host:
+
+1. Install, either way:
+   - Dashboard: **Plugins → Install from GitHub / Git URL**, enter `hoangvantuan/hermes-teams/plugin/teams-threads`, click **Install**.
+   - CLI: `hermes plugins install hoangvantuan/hermes-teams/plugin/teams-threads`.
+
+   If an older copy exists (e.g. copied by hand), tick **Force reinstall** (CLI: add `--force`).
+2. Make sure the plugin is enabled (`plugins.enabled` in `config.yaml` contains `teams-threads`).
+3. Restart the gateway (dashboard **Restart Gateway**, or restart the gateway service).
 4. Check `gateway.log` for `[teams-threads] registered ThreadAwareTeamsAdapter v<version>` and `✓ teams connected`.
+
+## Update
+
+- CLI: `hermes plugins update teams-threads`, then restart the gateway. Hermes re-installs from the recorded Git source.
+- Dashboard: the **Git pull** button is not shown for subdirectory installs (no `.git` in the plugin folder).
+  Repeat the Install step with **Force reinstall**, then restart the gateway.
 
 ## Configuration
 
@@ -41,8 +53,9 @@ answers without history. A thread with more than 3000 replies logs a WARNING; th
 
 ```
 hermes plugins disable teams-threads   # or remove it from plugins.enabled
-systemctl --user restart hermes-gateway.service
 ```
+
+Then restart the gateway.
 
 Hermes falls back to the bundled Teams adapter. The watermark stored in session metadata
 (`teams_thread_watermark`) is ignored by Hermes and can stay.
